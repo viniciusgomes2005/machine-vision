@@ -1,0 +1,7 @@
+numpy
+opencv-python
+# Optional for extended analysis or plotting:
+# scipy
+# scikit-image
+# pandas
+# matplotlib
