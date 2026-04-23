@@ -1,1 +1,0 @@
-"""Plant seedling inspection package."""

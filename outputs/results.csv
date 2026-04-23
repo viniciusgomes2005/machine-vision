@@ -1,9 +1,0 @@
-calibration_status,collar_diameter_px,image_name,leaf_area_px2,leaf_count,leaf_count_confidence,notes,pot_top_y_px,reference_diameter_px,species,total_length_px_advanced,total_length_px_basic
-not_calibrated_px_only,8.468600273132324,Eucalipto1.jpg,33902.0,9,high,advanced_length_fallback_to_basic,2539,652.0,eucalyptus,805.0,805.0
-not_calibrated_px_only,9.550000190734863,Eucalipto2.jpg,161261.0,8,high,advanced_length_fallback_to_basic,2524,651.0,eucalyptus,1191.0,1191.0
-not_calibrated_px_only,8.215800285339355,Eucalipto3.jpg,127768.0,9,high,advanced_length_fallback_to_basic,2539,651.5,eucalyptus,1117.0,1117.0
-not_calibrated_px_only,10.125800132751465,Eucalipto4.jpg,16712.0,6,high,advanced_length_fallback_to_basic,2547,651.0,eucalyptus,843.0,843.0
-not_calibrated_px_only,12.288599967956543,Eucalipto5.jpg,14052.0,3,high,advanced_length_fallback_to_basic,2547,651.0,eucalyptus,309.0,309.0
-not_calibrated_px_only,9.550000190734863,Pinheiro1.jpg,100366.0,15,low,pine_leaf_count_is_cluster_proxy_due_to_needle_overlap;advanced_length_fallback_to_basic,2512,651.5,pine,1579.0,1579.0
-not_calibrated_px_only,8.468600273132324,Pinheiro2.jpg,128509.0,12,low,pine_leaf_count_is_cluster_proxy_due_to_needle_overlap;advanced_length_fallback_to_basic,2528,651.5,pine,1251.0,1251.0
-not_calibrated_px_only,10.954400062561035,Pinheiro3.jpg,114583.0,11,low,pine_leaf_count_is_cluster_proxy_due_to_needle_overlap;advanced_length_fallback_to_basic,2536,652.0,pine,1577.0,1577.0
