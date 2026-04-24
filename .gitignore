@@ -12,6 +12,9 @@ __pycache__/
 # Claude
 *.claude
 
+# Imagens
+./Resultados_LuizVini_Projeto1
+
 # Distribution / packaging
 .Python
 build/
@@ -211,3 +214,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Resultados do projeto
+Resultados_LuizVini_Projeto1/
