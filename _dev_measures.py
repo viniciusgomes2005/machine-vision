@@ -34,6 +34,117 @@ def _maior_componente(mask):
     return labels == idx
 
 
+def _filtra_area_min(mask, area_min):
+    if not np.any(mask):
+        return np.zeros_like(mask, dtype=bool)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    saida = np.zeros_like(mask, dtype=bool)
+    for idx in range(1, n):
+        if stats[idx, cv2.CC_STAT_AREA] >= area_min:
+            saida |= labels == idx
+    return saida
+
+
+def _componentes_conectadas_a_semente(mask, ponto_base, altura_faixa, meia_largura, area_min):
+    if not np.any(mask):
+        return np.zeros_like(mask, dtype=bool)
+
+    x_base, y_base = ponto_base
+    h, w = mask.shape
+    y0 = max(0, y_base - altura_faixa)
+    y1 = min(h, y_base + 16)
+    x0 = max(0, x_base - meia_largura)
+    x1 = min(w, x_base + meia_largura)
+
+    semente = np.zeros_like(mask, dtype=bool)
+    semente[y0:y1, x0:x1] = True
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    saida = np.zeros_like(mask, dtype=bool)
+    ids_validos = np.unique(labels[mask & semente])
+
+    for idx in ids_validos:
+        if idx == 0:
+            continue
+        if stats[idx, cv2.CC_STAT_AREA] >= area_min:
+            saida |= labels == idx
+
+    return saida
+
+
+def _contornos_preenchidos(mask, area_min):
+    if not np.any(mask):
+        return np.zeros_like(mask, dtype=bool), []
+
+    contornos, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    saida = np.zeros(mask.shape, dtype=np.uint8)
+    mantidos = []
+    for contorno in contornos:
+        if cv2.contourArea(contorno) < area_min:
+            continue
+        cv2.drawContours(saida, [contorno], -1, 255, -1)
+        mantidos.append(contorno)
+
+    return saida > 0, mantidos
+
+
+def _mascara_caule_foliar(mask_planta, ponto_base, especie):
+    if not np.any(mask_planta):
+        vazio = np.zeros_like(mask_planta, dtype=bool)
+        return vazio, {"abertura_vertical": vazio, "caule_inicial": vazio}
+
+    mu = mask_planta.astype(np.uint8) * 255
+
+    if especie == "pinheiro":
+        kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 41))
+        abertura_vertical = cv2.morphologyEx(mu, cv2.MORPH_OPEN, kernel_vertical) > 0
+        abertura_vertical = cv2.morphologyEx(
+            abertura_vertical.astype(np.uint8) * 255,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 13)),
+        ) > 0
+        caule = _componentes_conectadas_a_semente(
+            abertura_vertical,
+            ponto_base,
+            altura_faixa=280,
+            meia_largura=55,
+            area_min=30,
+        )
+        caule = cv2.dilate(
+            caule.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 11)),
+            iterations=1,
+        ) > 0
+    else:
+        kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 29))
+        abertura_vertical = cv2.morphologyEx(mu, cv2.MORPH_OPEN, kernel_vertical) > 0
+        caule_inicial = abertura_vertical.copy()
+        caule = _componentes_conectadas_a_semente(
+            caule_inicial,
+            ponto_base,
+            altura_faixa=180,
+            meia_largura=85,
+            area_min=25,
+        )
+        caule = cv2.dilate(
+            caule.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 7)),
+            iterations=1,
+        ) > 0
+        return caule & mask_planta, {
+            "abertura_vertical": abertura_vertical,
+            "caule_inicial": caule_inicial & mask_planta,
+        }
+
+    return caule & mask_planta, {
+        "abertura_vertical": abertura_vertical,
+        "caule_inicial": abertura_vertical & mask_planta,
+    }
+
+
+PIN_LEAF_DIST_MAX = 3.0
+
+
 def SegmentaCena(img_rgb):
     h, w = img_rgb.shape[:2]
     hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
@@ -197,32 +308,66 @@ def DiametroColeto(mask_planta, y_topo_tubete, x_centro_tubete, janela_acima=70,
 # -----------------------------------------------------------------
 def AreaFoliar(mask_planta, especie):
     """
-    Para eucalipto: folhas = regioes da mascara com largura razoavel
-        (removemos o caule que e fino pela distancia-transformada).
-    Para pinheiro: a massa verde e a "area foliar aparente"
-        (aciculas contam como folhagem).
+    Remove o caule com uma mascara vertical ancorada no coleto e
+    conta apenas os contornos foliares restantes.
     """
     if not np.any(mask_planta):
-        return np.zeros_like(mask_planta, dtype=bool), 0
+        vazio = np.zeros_like(mask_planta, dtype=bool)
+        return vazio, vazio, {"folhas_cruas": vazio, "contornos": []}, 0
+
+    ys, xs = np.where(mask_planta)
+    y_base = int(ys.max())
+    x_base = int(np.median(xs[ys >= max(ys.min(), y_base - 25)]))
+    ponto_base = (x_base, y_base)
+
+    mask_caule, dbg_caule = _mascara_caule_foliar(mask_planta, ponto_base, especie)
 
     if especie == "pinheiro":
-        return mask_planta.copy(), int(np.sum(mask_planta))
+        dist = cv2.distanceTransform(mask_planta.astype(np.uint8), cv2.DIST_L2, 3)
+        exclusao_caule = cv2.dilate(
+            mask_caule.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 25)),
+            iterations=1,
+        ) > 0
+        folhas_cruas = mask_planta & (~exclusao_caule) & (dist <= PIN_LEAF_DIST_MAX)
+        folhas_cruas = cv2.morphologyEx(
+            folhas_cruas.astype(np.uint8) * 255,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        ) > 0
+        folhas_cruas = _filtra_area_min(folhas_cruas, area_min=18)
+        mask_folhas, contornos = _contornos_preenchidos(folhas_cruas, area_min=6)
+        mask_folhas = _filtra_area_min(mask_folhas, area_min=18)
+    else:
+        folhas_cruas = mask_planta & (~mask_caule)
+        folhas_cruas = cv2.morphologyEx(
+            folhas_cruas.astype(np.uint8) * 255,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        ) > 0
+        folhas_cruas = cv2.dilate(
+            folhas_cruas.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        ) > 0
+        folhas_cruas = _filtra_area_min(folhas_cruas, area_min=120)
+        mask_folhas, contornos = _contornos_preenchidos(folhas_cruas, area_min=80)
+        mask_folhas = _filtra_area_min(mask_folhas, area_min=140)
+        exclusao_caule = cv2.dilate(
+            mask_caule.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 7)),
+            iterations=1,
+        ) > 0
 
-    # Eucalipto: opening com kernel para retirar o caule fino
-    dist = cv2.distanceTransform(mask_planta.astype(np.uint8), cv2.DIST_L2, 3)
-    # O caule costuma ter dist <= 6. Folhas sao maiores.
-    mask_folhas = (dist > 6) & mask_planta
-    # Fecha para recuperar forma
-    mask_folhas = cv2.dilate(mask_folhas.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=2) > 0
-    mask_folhas = mask_folhas & mask_planta  # confinado a planta
-    # Filtra componentes pequenos (pedacos de caule com deformacao)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask_folhas.astype(np.uint8), connectivity=8)
-    lim = 300
-    saida = np.zeros_like(mask_folhas, dtype=bool)
-    for idx in range(1, n):
-        if stats[idx, cv2.CC_STAT_AREA] >= lim:
-            saida |= labels == idx
-    return saida, int(np.sum(saida))
+    mask_folhas &= (~exclusao_caule) & mask_planta
+
+    debug = {
+        **dbg_caule,
+        "folhas_cruas": folhas_cruas,
+        "contornos": contornos,
+        "ponto_base": ponto_base,
+    }
+    return mask_caule, mask_folhas, debug, int(np.sum(mask_folhas))
 
 
 # -----------------------------------------------------------------
@@ -372,14 +517,14 @@ def TesteUnico(caminho):
 
     alt = AlturaBasica(seg["mask_planta"], seg["y_topo_tubete"], seg["x_centro_tubete"])
     diam = DiametroColeto(seg["mask_planta"], seg["y_topo_tubete"], seg["x_centro_tubete"])
-    mask_folhas, area_folhas = AreaFoliar(seg["mask_planta"], esp)
+    mask_caule, mask_folhas, debug_area, area_folhas = AreaFoliar(seg["mask_planta"], esp)
     if esp == "eucalipto":
         n_folhas, pts_folhas = ContaFolhasEucalipto(mask_folhas)
     else:
         n_folhas, pts_folhas = ContaFolhasPinheiro(seg["mask_planta"])
     avan = ComprimentoAvancado(seg["mask_planta"], seg["y_topo_tubete"], seg["x_centro_tubete"])
 
-    fig, axs = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axs = plt.subplots(2, 4, figsize=(24, 12))
     axs = axs.ravel()
 
     # (0) original
@@ -406,28 +551,38 @@ def TesteUnico(caminho):
         axs[2].set_title("diametro coleto (n/a)")
     axs[2].imshow(vis_d)
 
-    # (3) area foliar em vermelho
-    vis_a = img.copy()
-    vis_a[mask_folhas] = (vis_a[mask_folhas] * 0.25 + np.array([255, 0, 0]) * 0.75).astype(np.uint8)
-    axs[3].imshow(vis_a); axs[3].set_title(f"area foliar = {area_folhas} px^2")
+    # (3) mascara do caule
+    vis_caule = img.copy()
+    vis_caule[mask_caule] = np.array([255, 220, 0], dtype=np.uint8)
+    axs[3].imshow(vis_caule); axs[3].set_title("caule removido")
 
-    # (4) folhas
+    # (4) area foliar em vermelho
+    vis_a = img.copy()
+    vis_a[mask_folhas] = np.array([255, 0, 0], dtype=np.uint8)
+    axs[4].imshow(vis_a); axs[4].set_title(f"area foliar = {area_folhas} px^2")
+
+    # (5) folhas
     vis_f = img.copy()
-    vis_f[mask_folhas] = (vis_f[mask_folhas] * 0.25 + np.array([255, 0, 0]) * 0.75).astype(np.uint8)
+    vis_f[mask_folhas] = np.array([255, 0, 0], dtype=np.uint8)
     for (cx, cy) in pts_folhas:
         cv2.circle(vis_f, (cx, cy), 18, (255, 255, 0), -1)
         cv2.circle(vis_f, (cx, cy), 18, (0, 0, 0), 2)
-    axs[4].imshow(vis_f); axs[4].set_title(f"numero folhas = {n_folhas}")
+    axs[5].imshow(vis_f); axs[5].set_title(f"numero folhas = {n_folhas}")
 
-    # (5) comprimento avancado
+    # (6) mascara crua apos tirar caule
+    vis_raw = img.copy()
+    vis_raw[debug_area["folhas_cruas"]] = np.array([255, 80, 80], dtype=np.uint8)
+    axs[6].imshow(vis_raw); axs[6].set_title("folhas cruas")
+
+    # (7) comprimento avancado
     vis_c = img.copy()
     if avan:
         for i in range(1, len(avan["pontos"])):
             cv2.line(vis_c, avan["pontos"][i - 1], avan["pontos"][i], (255, 0, 0), 5)
-        axs[5].set_title(f"compr. avancado = {avan['comprimento_px']:.0f}px")
+        axs[7].set_title(f"compr. avancado = {avan['comprimento_px']:.0f}px")
     else:
-        axs[5].set_title("compr. avancado (n/a)")
-    axs[5].imshow(vis_c)
+        axs[7].set_title("compr. avancado (n/a)")
+    axs[7].imshow(vis_c)
 
     for a in axs:
         a.axis("off")
