@@ -29,6 +29,10 @@ MEIA_LARGURA_SUPORTE = 4
 ROI_INICIO_TUBETE_FRAC = 0.45
 LARGURA_MIN_TUBETE_FRAC = 0.08
 LINHAS_CONSECUTIVAS_TOPO = 8
+OFFSET_Y_BORDA_TRASEIRA = 2
+PERSISTENCIA_BORDA_TRASEIRA = 4
+OFFSET_Y_MEDIA_CONFIANCA = 6
+OFFSET_Y_BAIXA_CONFIANCA = 2
 
 
 def _odd(v: int) -> int:
@@ -293,6 +297,30 @@ def _estimar_topo_funcional_vaso(
                 break
         y_top = int(y_cand)
 
+    # Cena 3D: o topo funcional deve tangenciar a BORDA SUPERIOR do vaso.
+    # Busca uma "frente de borda" acima do corpo, com largura menor que o corpo
+    # mas ainda consistente e centrada.
+    if y_top is not None and x_top_center is not None:
+        largura_rim = int(max(10, 0.28 * largura_target))
+        y_from = max(roi_inicio_y, y_top - 90)
+        y_to = y_top
+        y_rim = y_top
+        # procura o primeiro y (mais alto) com persistencia local
+        for y in range(y_from, y_to + 1):
+            hits = 0
+            for yy in range(y, min(y_to + 1, y + 6)):
+                if larguras[yy] < largura_rim:
+                    continue
+                xc = centros[yy]
+                if xc < 0:
+                    continue
+                if abs(int(xc) - int(x_top_center)) <= x_tol_relax:
+                    hits += 1
+            if hits >= 3:
+                y_rim = y
+                break
+        y_top = int(y_rim)
+
     debug = {
         'largura_min_px': int(largura_floor),
         'largura_target_px': int(largura_target),
@@ -304,6 +332,87 @@ def _estimar_topo_funcional_vaso(
         'x_direita_por_linha': xdir,
     }
     return y_top, x_top_center, debug
+
+
+def _refinar_topo_borda_traseira(
+    mask_objetos: np.ndarray,
+    y_topo_frente: int,
+    x_centro_ref: int,
+    bbox_corpo: Tuple[int, int, int, int],
+    persistencia: int = PERSISTENCIA_BORDA_TRASEIRA,
+    offset_y: int = OFFSET_Y_BORDA_TRASEIRA,
+) -> Tuple[int, Dict[str, int]]:
+    h, w = mask_objetos.shape
+    _, _, bw, _ = bbox_corpo
+    bw = int(max(40, bw))
+
+    # Regiao da boca (parte traseira) costuma ser mais estreita que a parede frontal.
+    w_min = int(max(16, 0.10 * bw))
+    w_max = int(max(w_min + 8, 0.72 * bw))
+    x_tol = int(max(22, 0.10 * bw))
+
+    y_from = max(0, int(y_topo_frente) - 140)
+    y_to = max(0, int(y_topo_frente) - 4)
+    if y_from > y_to:
+        return int(y_topo_frente), {
+            "y_topo_frente": int(y_topo_frente),
+            "y_topo_borda_traseira": int(y_topo_frente),
+            "hits_borda_traseira": 0,
+        }
+
+    # Fecha pequenas falhas para deixar a borda superior mais continua.
+    mask_ref = cv2.morphologyEx(mask_objetos, cv2.MORPH_CLOSE, _kernel((5, 3)))
+
+    melhor_y = int(y_topo_frente)
+    melhor_hits = 0
+    janela = max(persistencia + 2, 8)
+
+    for y in range(y_from, y_to + 1):
+        hits = 0
+        for yy in range(y, min(y_to + 1, y + janela)):
+            seg = _segmento_principal_linha(mask_ref, yy, x_ref=int(x_centro_ref))
+            if seg is None:
+                continue
+            x0, x1 = seg
+            largura = int(x1 - x0 + 1)
+            xc = int((x0 + x1) / 2)
+            if largura < w_min or largura > w_max:
+                continue
+            if abs(xc - int(x_centro_ref)) > x_tol:
+                continue
+            hits += 1
+
+        if hits >= persistencia:
+            melhor_y = int(y)
+            melhor_hits = int(hits)
+            break
+        if hits > melhor_hits:
+            melhor_hits = int(hits)
+
+    # Ajuste adaptativo por confianca da evidência de borda traseira:
+    # - alta: sobe pouco (encaixe fino)
+    # - media: sobe mais (quando a borda aparece mas com baixa persistencia)
+    # - baixa: nao sobe; desloca levemente para baixo para evitar falso topo alto.
+    limiar_medio = max(2, int(persistencia) - 2)
+    modo = 0  # 2=alta, 1=media, 0=baixa
+    if melhor_hits >= int(persistencia):
+        y_refinado = max(0, int(melhor_y) - int(max(0, offset_y)))
+        y_refinado = min(int(y_topo_frente), int(y_refinado))
+        modo = 2
+    elif melhor_hits >= limiar_medio:
+        y_refinado = max(0, int(melhor_y) - int(max(0, OFFSET_Y_MEDIA_CONFIANCA)))
+        y_refinado = min(int(y_topo_frente), int(y_refinado))
+        modo = 1
+    else:
+        y_refinado = min(h - 1, int(y_topo_frente) + int(max(0, OFFSET_Y_BAIXA_CONFIANCA)))
+        modo = 0
+
+    return int(y_refinado), {
+        "y_topo_frente": int(y_topo_frente),
+        "y_topo_borda_traseira": int(y_refinado),
+        "hits_borda_traseira": int(melhor_hits),
+        "modo_borda_traseira": int(modo),
+    }
 
 
 def detectar_tubete_melhorado(
@@ -338,6 +447,21 @@ def detectar_tubete_melhorado(
         metodo = 'fallback_conservador'
         y_topo_func = int(max(roi_inicio_y, int(h * 0.72)))
         x_center_func = int(w // 2)
+
+    bbox_corpo = _bbox_from_mask(mask_corpo)
+    dbg_borda = {
+        "y_topo_frente": int(y_topo_func),
+        "y_topo_borda_traseira": int(y_topo_func),
+        "hits_borda_traseira": 0,
+    }
+    if confianca:
+        y_refinado, dbg_borda = _refinar_topo_borda_traseira(
+            mask_objetos=mask_objetos,
+            y_topo_frente=int(y_topo_func),
+            x_centro_ref=int(x_center_func),
+            bbox_corpo=bbox_corpo,
+        )
+        y_topo_func = int(y_refinado)
 
     mask_tubete = mask_corpo.copy()
     mask_tubete[: int(y_topo_func), :] = 0
@@ -384,6 +508,7 @@ def detectar_tubete_melhorado(
         'metodo_tubete': metodo,
         'confianca_tubete': bool(confianca),
         **dbg_perfil,
+        **dbg_borda,
     }
 
     return {
@@ -598,57 +723,59 @@ def achar_base_coleto(
     mask_boca_removida: Optional[np.ndarray] = None,
 ) -> Tuple[int, int]:
     h, w = mask_planta_acima.shape
-    y_ini = max(0, y_topo_tubete - 22)
-    # A base do coleto deve estar acima do topo do tubete.
-    y_fim = min(h - 1, y_topo_tubete - MARGEM_SEGURA_VASO)
+    # Linha de tangencia horizontal do vaso.
+    y_tangencia = int(y_topo_tubete)
+    y_limite = max(0, min(h - 1, y_tangencia - MARGEM_SEGURA_VASO))
 
-    faixa_x = int(max(30, w * 0.12))
-    x_min = max(0, x_centro_tubete - faixa_x)
-    x_max = min(w - 1, x_centro_tubete + faixa_x)
+    # Busca o primeiro ponto de caule acima da tangencia.
+    faixa_x = int(max(35, w * 0.10))
+    x_min = max(0, int(x_centro_tubete) - faixa_x)
+    x_max = min(w - 1, int(x_centro_tubete) + faixa_x)
+    y_top_busca = max(0, y_limite - 140)
 
-    for y in range(y_fim, y_ini - 1, -1):
-        row = mask_planta_acima[y, x_min : x_max + 1]
-        xs = np.where(row > 0)[0]
-        if xs.size == 0:
+    for y in range(y_limite, y_top_busca - 1, -1):
+        segs = _segmentos_horizontais(mask_planta_acima[y, :])
+        if not segs:
             continue
-        xs_global = xs + x_min
-        x_base = int(np.median(xs_global))
-        # Evita pegar tampa/vaso: prioriza linha estreita local de coleto.
-        largura_local = int(xs_global.max() - xs_global.min() + 1)
-        cond_largura = largura_local <= MAX_LARGURA_BASE_COLETO
-        cond_y = int(y) < int(y_topo_tubete - MARGEM_SEGURA_VASO)
-        cond_sup = tem_suporte_vertical(mask_planta_acima, x_base, int(y))
-        cond_tub = True
+
+        # Segmento mais plausivel de caule: estreito e perto do centro do vaso.
+        melhor = None
+        melhor_score = 1e12
+        for x0, x1 in segs:
+            # restringe ao corredor central do vaso
+            if x1 < x_min or x0 > x_max:
+                continue
+            largura = int(x1 - x0 + 1)
+            if largura > MAX_LARGURA_BASE_COLETO:
+                continue
+            xc = int((x0 + x1) / 2)
+            dist_centro = abs(int(xc) - int(x_centro_tubete))
+            score = float(dist_centro) + 0.25 * float(largura)
+            if score < melhor_score:
+                melhor_score = score
+                melhor = (xc, largura)
+
+        if melhor is None:
+            continue
+
+        x_base, _ = melhor
+        if not tem_suporte_vertical(mask_planta_acima, x_base, int(y)):
+            continue
         if mask_tubete is not None and 0 <= int(y) < h and 0 <= int(x_base) < w:
-            cond_tub = bool(mask_tubete[int(y), int(x_base)] == 0)
-        cond_boca = True
+            if mask_tubete[int(y), int(x_base)] > 0:
+                continue
         if mask_boca_removida is not None and 0 <= int(y) < h and 0 <= int(x_base) < w:
-            cond_boca = bool(mask_boca_removida[int(y), int(x_base)] == 0)
-
-        if cond_largura and cond_y and cond_sup and cond_tub and cond_boca:
-            return x_base, int(y)
-
-    # Fallback: se nao achou linha estreita, mantem regra anterior.
-    for y in range(y_fim, y_ini - 1, -1):
-        row = mask_planta_acima[y, x_min : x_max + 1]
-        xs = np.where(row > 0)[0]
-        if xs.size == 0:
-            continue
-        xs_global = xs + x_min
-        x_base = int(np.median(xs_global))
-        if tem_suporte_vertical(mask_planta_acima, x_base, int(y)):
-            if mask_tubete is not None and mask_tubete[int(y), int(x_base)] > 0:
+            if mask_boca_removida[int(y), int(x_base)] > 0:
                 continue
-            if mask_boca_removida is not None and mask_boca_removida[int(y), int(x_base)] > 0:
-                continue
-            if int(y) < int(y_topo_tubete - MARGEM_SEGURA_VASO):
-                return x_base, int(y)
+
+        return int(x_base), int(y)
 
     ys_all, xs_all = np.where(mask_planta_acima > 0)
     if ys_all.size == 0:
-        return int(x_centro_tubete), int(max(0, y_topo_tubete - MARGEM_SEGURA_VASO))
+        return int(x_centro_tubete), int(y_limite)
 
-    alvo_y = max(0, y_topo_tubete - MARGEM_SEGURA_VASO)
+    # Fallback conservador: ponto mais proximo do centro na linha limite.
+    alvo_y = int(y_limite)
     dist2 = (xs_all - x_centro_tubete) ** 2 + (ys_all - alvo_y) ** 2
     idx = int(np.argmin(dist2))
     return int(xs_all[idx]), int(ys_all[idx])
@@ -758,11 +885,24 @@ def _salvar_debug_fronteira_vaso(
     img_bgr: np.ndarray,
     y_topo_tubete: int,
     y_limite_planta: int,
+    y_topo_frente: Optional[int] = None,
 ) -> None:
     overlay = img_bgr.copy()
     h, w = overlay.shape[:2]
     y_top = int(max(0, min(h - 1, y_topo_tubete)))
     y_lim = int(max(0, min(h - 1, y_limite_planta)))
+    if y_topo_frente is not None:
+        y_front = int(max(0, min(h - 1, int(y_topo_frente))))
+        cv2.line(overlay, (0, y_front), (w - 1, y_front), (255, 0, 255), 1)
+        cv2.putText(
+            overlay,
+            f"y_topo_frente={y_front}",
+            (20, max(24, y_front - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 0, 255),
+            2,
+        )
     cv2.line(overlay, (0, y_top), (w - 1, y_top), (0, 0, 255), 2)
     cv2.line(overlay, (0, y_lim), (w - 1, y_lim), (0, 255, 255), 2)
     cv2.putText(
@@ -857,6 +997,7 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
             img_bgr=img_bgr,
             y_topo_tubete=y_topo_tubete,
             y_limite_planta=y_limite_planta,
+            y_topo_frente=int(debug_tubete["y_topo_frente"]) if isinstance(debug_tubete, dict) and "y_topo_frente" in debug_tubete else None,
         )
         overlay_base = img_bgr.copy()
         cv2.circle(overlay_base, (int(ponto_base[0]), int(ponto_base[1])), 6, (0, 255, 255), -1)
