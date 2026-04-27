@@ -1,0 +1,23 @@
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local tooling
+.codex
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+
+# Project runtime/debug outputs
+_dev_debug/
+relatorio_avaliacao.csv
