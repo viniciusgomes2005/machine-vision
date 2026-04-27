@@ -274,6 +274,79 @@ def stem_has_support_below(stem, look_h, radius):
     return sup > 0
 
 
+def morph_skeleton(mask):
+    if not np.any(mask):
+        return np.zeros_like(mask, dtype=bool)
+    img = (mask.astype(np.uint8) * 255)
+    skel = np.zeros_like(img)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    while True:
+        eroded = cv2.erode(img, kernel)
+        temp = cv2.dilate(eroded, kernel)
+        temp = cv2.subtract(img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        img = eroded
+        if cv2.countNonZero(img) == 0:
+            break
+    return skel > 0
+
+
+def trace_stem_path_from_base(skel, seg, max_dx):
+    h, _ = skel.shape
+    ys = np.where(skel)[0]
+    if len(ys) == 0:
+        return np.zeros_like(skel, dtype=bool)
+    y_top = int(ys.min())
+    y_base = min(h - 1, int(seg["ponto_base"][1]))
+    x_ref = int(seg["x_centro_tubete"])
+
+    start = None
+    for y in range(min(h - 1, y_base + 10), max(0, y_base - 50) - 1, -1):
+        xs = np.where(skel[y])[0]
+        if len(xs):
+            x = int(xs[np.argmin(np.abs(xs - x_ref))])
+            start = (y, x)
+            break
+    if start is None:
+        return np.zeros_like(skel, dtype=bool)
+
+    y0, x_prev = start
+    path = np.zeros_like(skel, dtype=bool)
+    path[y0, x_prev] = True
+
+    for y in range(y0 - 1, y_top - 1, -1):
+        xs = np.where(skel[y])[0]
+        if len(xs) == 0:
+            continue
+        close = xs[np.abs(xs - x_prev) <= max_dx]
+        if len(close):
+            x = int(close[np.argmin(np.abs(close - x_prev))])
+        else:
+            x = int(xs[np.argmin(np.abs(xs - x_prev))])
+            if abs(x - x_prev) > int(1.5 * max_dx):
+                continue
+        path[y, x] = True
+        x_prev = x
+    return path
+
+
+def remove_sparse_stem_trace(final, seg, cfg):
+    if not np.any(final):
+        return final, np.zeros_like(final, dtype=bool)
+    skel = morph_skeleton(final)
+    path = trace_stem_path_from_base(skel, seg, cfg.get("sparse_trace_max_dx", 34))
+    if not np.any(path):
+        return final, np.zeros_like(final, dtype=bool)
+    k = cfg.get("sparse_trace_dilate_k", (13, 13))
+    remove = cv2.dilate(
+        path.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, k),
+        iterations=1,
+    ) > 0
+    out = final & (~remove)
+    return out, remove
+
+
 def remove_pinheiro_vase_rim(mask, seg):
     if not np.any(mask):
         return mask, np.zeros_like(mask, dtype=bool)
@@ -304,20 +377,33 @@ def remove_pinheiro_vase_rim(mask, seg):
 def resolve_eucalipto_variant(img_rgb, seg, cfg):
     body = seg["mask_corpo"]
     fine = make_fine_mask(img_rgb, seg, cfg["hmin"], cfg["hmax"], cfg["smin"], cfg["vmin"], cfg["gbmin"], cfg["grmin"], cfg["fine_dilate_k"])
-    stem = base.mascara_caule_eucalipto(body, seg["ponto_base"], {
+    stem_params = {
         "stem_dist_max": cfg["stem_dist_max"],
         "stem_height": 110,
         "stem_x_half": 90,
         "stem_y_extra": 20,
         "stem_area_min": 80,
         "stem_dilate_k": cfg["stem_dilate_k"],
-    })
+    }
+    stem = base.mascara_caule_eucalipto(body, seg["ponto_base"], stem_params)
+    body_px = max(1, int(np.count_nonzero(body)))
+    if np.count_nonzero(stem) > 0.50 * body_px:
+        stem = base.mascara_caule_eucalipto(body, seg["ponto_base"], {
+            **stem_params, "stem_dist_max": cfg["stem_dist_max"] * 0.6
+        })
+    stem_ratio = float(np.count_nonzero(stem)) / float(body_px)
+    sparse_stem = stem_ratio < cfg.get("sparse_stem_ratio", 0.08)
 
     dist = base.distancia_ao_stem(stem)
     support_above = stem_has_support_above(stem, cfg["look_h"], cfg["look_radius"])
     support_below = stem_has_support_below(stem, max(20, cfg["look_h"] // 2), cfg["look_radius"])
     stem_core = stem & support_above & support_below
-    axis = base.eixo_x_por_linha(stem if np.any(stem) else body, seg["x_centro_tubete"])
+    axis_body = base.eixo_x_por_linha(body, seg["x_centro_tubete"])
+    if sparse_stem:
+        axis = axis_body
+    else:
+        axis = base.eixo_x_por_linha(stem if np.any(stem) else body, seg["x_centro_tubete"])
+    xx = np.arange(body.shape[1], dtype=np.float32)[None, :]
     y_top, y_base, height = height_info(seg)
     branch_y = estimate_branch_y(seg, stem, cfg["branch_width_factor"])
     top_mask = np.zeros_like(body, dtype=bool)
@@ -370,18 +456,70 @@ def resolve_eucalipto_variant(img_rgb, seg, cfg):
     if mode in {"sided_components_both", "support_gap_right", "hybrid_right"}:
         excl_kernel = cfg.get("stem_core_exclude_k", cfg["stem_exclude_k"])
     excl = cv2.dilate(stem_for_excl.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, excl_kernel), iterations=1) > 0
-    if mode in {
+    if mode == "sided_components_both":
+        # 1. Hard exclusion using the full stem (not just stem_core).
+        excl_full = cv2.dilate(stem.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, excl_kernel), iterations=1) > 0
+        final &= (~excl_full)
+        # 2. Axis-column exclusion: morph_close can bridge leaf patches across the trunk,
+        #    filling the trunk region with smooth=True. Exclude a corridor around the axis
+        #    below the top region where the bare trunk is exposed.
+        trunk_half = cfg.get("trunk_axis_excl_half", 0)
+        if trunk_half > 0:
+            trunk_zone = np.abs(xx - axis[:, None]) <= trunk_half
+            keep_top_rel = cfg.get("trunk_axis_keep_top_rel", 0.10)
+            y_keep = max(0, min(body.shape[0], int(y_top + keep_top_rel * max(1, height))))
+            trunk_zone[:y_keep, :] = False
+            final[trunk_zone] = False
+        if sparse_stem:
+            sparse_half = cfg.get("sparse_stem_axis_excl_half", trunk_half)
+            if sparse_half > 0:
+                center_zone = np.abs(xx - axis[:, None]) <= sparse_half
+                keep_top_rel = cfg.get("trunk_axis_keep_top_rel", 0.10)
+                y_keep = max(0, min(body.shape[0], int(y_top + keep_top_rel * max(1, height))))
+                center_zone[:y_keep, :] = False
+                final[center_zone] = False
+    elif mode in {
         "line_right_recover",
         "component_recover_right",
         "support_pruned_stem",
         "hybrid_right",
         "support_gap_right",
-        "sided_components_both",
     }:
         final &= ((~excl) | (~support_above) | (~support_below))
     else:
         final &= (~excl)
-    final |= top_mask & (body | fine)
+    top_recover = top_mask & (body | fine)
+    top_axis_half = cfg.get("top_axis_excl_half", cfg.get("trunk_axis_excl_half", 0))
+    if sparse_stem:
+        top_axis_half = cfg.get("top_axis_excl_half_sparse", top_axis_half)
+    if top_axis_half > 0:
+        top_recover &= np.abs(xx - axis[:, None]) > top_axis_half
+    final |= top_recover
+    sparse_trace_removed = np.zeros_like(final, dtype=bool)
+    if sparse_stem and cfg.get("remove_sparse_trace", True):
+        final, sparse_trace_removed = remove_sparse_stem_trace(final, seg, cfg)
+
+    if cfg.get("final_stem_hard_remove", True):
+        stem_hard = stem.copy()
+        if sparse_stem and cfg.get("sparse_alt_stem_remove", True):
+            alt_stem_params = {
+                **stem_params,
+                "stem_dist_max": cfg.get("sparse_alt_stem_dist_max", stem_params["stem_dist_max"] * 1.9),
+                "stem_area_min": cfg.get("sparse_alt_stem_area_min", max(15, stem_params["stem_area_min"] // 3)),
+                "stem_dilate_k": cfg.get("sparse_alt_stem_dilate_k", stem_params["stem_dilate_k"]),
+            }
+            stem_hard |= base.mascara_caule_eucalipto(body, seg["ponto_base"], alt_stem_params)
+        hard_k = cfg.get("final_stem_hard_remove_k", cfg.get("stem_core_exclude_k", cfg["stem_exclude_k"]))
+        hard_excl = cv2.dilate(
+            stem_hard.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, hard_k),
+            iterations=1,
+        ) > 0
+        keep_top_rel = cfg.get("final_stem_keep_top_rel", 0.05)
+        y_keep = max(0, min(body.shape[0], int(y_top + keep_top_rel * max(1, height))))
+        hard_excl[:y_keep, :] = False
+        final[hard_excl] = False
+
     final = base.filtra_area_min(final, cfg["final_area_min"])
 
     return {
@@ -391,6 +529,7 @@ def resolve_eucalipto_variant(img_rgb, seg, cfg):
         "mask_vertical": stem.copy(),
         "folhas_cruas": smooth,
         "mask_folhas": final,
+        "mask_trace_removed": sparse_trace_removed,
         "recorte_vaso": np.zeros_like(body, dtype=bool),
         "area": int(np.count_nonzero(final)),
     }
@@ -404,8 +543,20 @@ def pinheiro_variants():
 
 def eucalipto_variants():
     return [
-        {"name": "E1 base lados", "mode": "sided_components_both", "hmin": 18, "hmax": 108, "smin": 10, "vmin": 20, "gbmin": 2, "grmin": -2, "fine_dilate_k": (5, 5), "stem_dist_max": 1.15, "stem_dilate_k": (5, 7), "stem_exclude_k": (3, 3), "stem_core_exclude_k": (5, 5), "dist_min": 2.0, "recover_dist": 1.0, "line_dx": 10, "right_dx": 8, "left_dx": 8, "seed_area": 3, "branch_width_factor": 1.45, "look_h": 90, "look_radius": 8, "close_k": (5, 5), "leaf_dilate_k": (3, 3), "final_area_min": 8},
+        {"name": "E1 base lados", "mode": "sided_components_both", "hmin": 18, "hmax": 108, "smin": 10, "vmin": 20, "gbmin": 2, "grmin": -2, "fine_dilate_k": (5, 5), "stem_dist_max": 1.15, "stem_dilate_k": (5, 7), "stem_exclude_k": (3, 3), "stem_core_exclude_k": (5, 5), "dist_min": 2.0, "recover_dist": 1.0, "line_dx": 10, "right_dx": 8, "left_dx": 8, "seed_area": 3, "branch_width_factor": 1.45, "look_h": 90, "look_radius": 8, "close_k": (5, 5), "leaf_dilate_k": (3, 3), "final_area_min": 8, "trunk_axis_excl_half": 12, "trunk_axis_keep_top_rel": 0.10, "top_axis_excl_half": 8, "sparse_stem_ratio": 0.08, "sparse_stem_axis_excl_half": 24, "top_axis_excl_half_sparse": 24, "remove_sparse_trace": True, "sparse_trace_max_dx": 34, "sparse_trace_dilate_k": (17, 17), "final_stem_hard_remove": True, "final_stem_hard_remove_k": (9, 9), "final_stem_keep_top_rel": 0.04, "sparse_alt_stem_remove": True, "sparse_alt_stem_dist_max": 2.2, "sparse_alt_stem_area_min": 20, "sparse_alt_stem_dilate_k": (7, 9)},
     ]
+
+
+def resolve_eucalipto_with_fallback(img_rgb, seg, cfg):
+    res = resolve_eucalipto_variant(img_rgb, seg, cfg)
+    body_area = int(np.count_nonzero(seg["mask_corpo"]))
+    if body_area > 0 and res["area"] < 0.50 * body_area:
+        fallback_cfg = {**cfg, "mode": "baseline", "dist_min": 1.0}
+        res2 = resolve_eucalipto_variant(img_rgb, seg, fallback_cfg)
+        if res2["area"] > res["area"]:
+            print(f"  [fallback] area {res['area']} -> {res2['area']} (body={body_area}, ratio={res['area']/body_area:.2f})")
+            return res2
+    return res
 
 
 def natural_key(path_obj):
@@ -442,8 +593,8 @@ def save_gallery_all(species_name, image_paths, results, title, out_name):
         ax.imshow(overlay)
         ax.set_title(f"{img_path.stem}\narea={res['area']} px")
         ax.axis("off")
-    fig.suptitle(title, fontsize=18)
-    fig.tight_layout()
+    fig.suptitle(title, fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
     out = OUT_DIR / out_name
     fig.savefig(out, dpi=120, bbox_inches="tight")
     plt.close(fig)
@@ -485,7 +636,7 @@ def main():
     for img_path in euc_paths:
         img = base.ler_imagem_rgb(img_path)
         seg = base.segmenta_base(img)
-        res = resolve_eucalipto_variant(img, seg, euc_cfg)
+        res = resolve_eucalipto_with_fallback(img, seg, euc_cfg)
         euc_results.append(res)
         print(f"{img_path.stem} | area={res['area']}")
     out_euc = save_gallery_all(
