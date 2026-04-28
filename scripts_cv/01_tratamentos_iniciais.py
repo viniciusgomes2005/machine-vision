@@ -70,6 +70,15 @@ CAULE_MIN_PONTOS_EIXO = 4  # minimo de pontos para aceitar o eixo estimado
 CAULE_SUAVIZACAO_FRAC = 0.012  # suavizacao relativa do eixo do caule
 CAULE_DESVIO_LATERAL_MAX_FRAC = 0.78  # desvio lateral relativo maximo permitido
 CAULE_DESVIO_LATERAL_MAX_ABS = 920  # limite absoluto de desvio lateral
+RECUPERAR_BOCA_GAP_MIN = 45  # gap minimo da correcao por vaso escuro para recuperar planta na boca
+RECUPERAR_BOCA_PIX_ACIMA = 35  # faixa acima do corte usada como ancora da recuperacao
+RECUPERAR_BOCA_PIX_ABAIXO = 60  # faixa abaixo do topo escuro usada para recuperar caule/folhas
+RECUPERAR_BOCA_MEIA_LARGURA = 380  # janela horizontal da recuperacao perto da boca do tubete
+RECUPERAR_BOCA_DIL_SEED = 15  # dilatacao para exigir continuidade com a planta ja aceita
+RECUPERAR_BOCA_AREA_MIN = 8
+RECUPERAR_BOCA_AREA_MAX = 12000
+RECUPERAR_BOCA_LARGURA_MAX = 360
+RECUPERAR_BOCA_ALTURA_MAX = 120
 
 
 def _muda_compacta_com_tubete_alto(mask: np.ndarray, y_referencia_vaso: int) -> bool:
@@ -1147,6 +1156,89 @@ def _recuperar_extremos_para_comprimento(
     return out
 
 
+def _recuperar_planta_boca_tubete(
+    img_bgr: np.ndarray,
+    mask_objetos: np.ndarray,
+    mask_planta_acima: np.ndarray,
+    mask_tubete: np.ndarray,
+    y_topo_tubete: int,
+    y_limite_planta: int,
+    x_centro_tubete: int,
+    debug_tubete: object,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, Dict[str, int]]:
+    h, w = mask_planta_acima.shape
+    info = {
+        "recuperacao_boca_usada": 0,
+        "recuperacao_boca_pixels": 0,
+        "recuperacao_boca_y_max": int(y_limite_planta),
+    }
+    if not isinstance(debug_tubete, dict):
+        return mask_planta_acima, mask_tubete, np.zeros_like(mask_planta_acima), int(y_topo_tubete), info
+    if "y_topo_corrigido_vaso_escuro" not in debug_tubete:
+        return mask_planta_acima, mask_tubete, np.zeros_like(mask_planta_acima), int(y_topo_tubete), info
+
+    y_frente = int(debug_tubete.get("y_topo_frente", y_topo_tubete))
+    gap = int(y_topo_tubete) - int(y_frente)
+    if gap < RECUPERAR_BOCA_GAP_MIN:
+        return mask_planta_acima, mask_tubete, np.zeros_like(mask_planta_acima), int(y_topo_tubete), info
+
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    hh = hsv[:, :, 0]
+    ss = hsv[:, :, 1]
+    vv = hsv[:, :, 2]
+
+    verde = (hh >= 28) & (hh <= 98) & (ss >= 25) & (vv >= 35)
+    caule = (((hh <= 32) | (hh >= 165)) & (ss >= 35) & (vv >= 45) & (vv <= 235))
+    candidato = ((verde | caule).astype(np.uint8)) * 255
+    candidato = cv2.bitwise_and(candidato, mask_objetos)
+
+    # Evita reabrir a parede escura/preta do tubete e o vaso branco externo.
+    vaso_obvio = (((ss <= 80) & (vv <= 145)) | ((ss <= 45) & (vv >= 150))).astype(np.uint8) * 255
+    candidato[vaso_obvio > 0] = 0
+
+    regiao = np.zeros_like(mask_planta_acima)
+    y0 = max(0, int(y_limite_planta) - RECUPERAR_BOCA_PIX_ACIMA)
+    y1 = min(h - 1, int(y_topo_tubete) + RECUPERAR_BOCA_PIX_ABAIXO)
+    x0 = max(0, int(x_centro_tubete) - RECUPERAR_BOCA_MEIA_LARGURA)
+    x1 = min(w - 1, int(x_centro_tubete) + RECUPERAR_BOCA_MEIA_LARGURA)
+    regiao[y0 : y1 + 1, x0 : x1 + 1] = 255
+    candidato = cv2.bitwise_and(candidato, regiao)
+
+    seed = cv2.dilate(mask_planta_acima, _kernel((RECUPERAR_BOCA_DIL_SEED, RECUPERAR_BOCA_DIL_SEED)), iterations=1)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidato, connectivity=8)
+    recuperar = np.zeros_like(mask_planta_acima)
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < RECUPERAR_BOCA_AREA_MIN or area > RECUPERAR_BOCA_AREA_MAX:
+            continue
+        bw = int(stats[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if bw > RECUPERAR_BOCA_LARGURA_MAX or bh > RECUPERAR_BOCA_ALTURA_MAX:
+            continue
+        comp = labels == label
+        if not np.any(comp & (seed > 0)):
+            continue
+        recuperar[comp] = 255
+
+    pixels = int(np.count_nonzero(recuperar))
+    if pixels == 0:
+        return mask_planta_acima, mask_tubete, recuperar, int(y_topo_tubete), info
+
+    out_planta = cv2.bitwise_or(mask_planta_acima, recuperar)
+    out_tubete = mask_tubete.copy()
+    out_tubete[recuperar > 0] = 0
+
+    ys, _ = np.where(recuperar > 0)
+    y_max = int(np.max(ys)) if ys.size else int(y_limite_planta)
+    y_topo_altura = int(max(y_topo_tubete, min(h - 1, y_max + MARGEM_SEGURA_VASO)))
+    info = {
+        "recuperacao_boca_usada": 1,
+        "recuperacao_boca_pixels": int(pixels),
+        "recuperacao_boca_y_max": int(y_max),
+    }
+    return out_planta, out_tubete, recuperar, y_topo_altura, info
+
+
 def remover_boca_vaso(
     img_bgr: np.ndarray,
     mask_planta_acima: np.ndarray,
@@ -1706,6 +1798,27 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
     mask_planta_acima, mask_barra_rodape_removida = _remover_barra_horizontal_rodape(mask_planta_acima)
     debug_residuo["mask_barra_horizontal_rodape_removida"] = mask_barra_rodape_removida
     mask_planta_acima[y_limite_planta:, :] = 0
+
+    (
+        mask_planta_acima,
+        mask_tubete,
+        mask_boca_recuperada,
+        y_topo_tubete_altura,
+        debug_recuperacao_boca,
+    ) = _recuperar_planta_boca_tubete(
+        img_bgr=img_bgr,
+        mask_objetos=mask_objetos,
+        mask_planta_acima=mask_planta_acima,
+        mask_tubete=mask_tubete,
+        y_topo_tubete=int(y_topo_tubete),
+        y_limite_planta=int(y_limite_planta),
+        x_centro_tubete=int(x_centro_tubete),
+        debug_tubete=debug_tubete,
+    )
+    y_limite_altura = max(
+        int(y_limite_planta),
+        max(0, min(mask_planta_acima.shape[0] - 1, int(y_topo_tubete_altura) - MARGEM_SEGURA_VASO)),
+    )
     mask_comprimento_total = _recuperar_extremos_para_comprimento(
         mask_planta_final=mask_planta_acima,
         mask_objetos=mask_objetos,
@@ -1721,7 +1834,7 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
     )
 
     skeleton = skeletonize(mask_planta_acima)
-    skeleton[y_limite_planta:, :] = 0
+    skeleton[y_limite_altura:, :] = 0
     mask_caule = estimar_eixo_caule(mask_planta_acima, ponto_base, usar_pista_cor=False)
     mask_caule_refinado_comprimento = estimar_eixo_caule(
         mask_planta_acima,
@@ -1729,8 +1842,8 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
         img_bgr=img_bgr,
         usar_pista_cor=True,
     )
-    mask_caule[y_limite_planta:, :] = 0
-    mask_caule_refinado_comprimento[y_limite_planta:, :] = 0
+    mask_caule[y_limite_altura:, :] = 0
+    mask_caule_refinado_comprimento[y_limite_altura:, :] = 0
 
     if debug_dir is not None:
         debug_masks = {
@@ -1744,6 +1857,7 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
             "skeleton": skeleton,
             "mask_caule": mask_caule,
             "mask_caule_refinado_comprimento": mask_caule_refinado_comprimento,
+            "mask_boca_recuperada": mask_boca_recuperada,
         }
         if isinstance(debug_tubete, dict):
             if "mask_vaso_candidata" in debug_tubete:
@@ -1786,13 +1900,17 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
         "mask_objetos": mask_objetos,
         "mask_tubete": mask_tubete,
         "y_topo_tubete": y_topo_tubete,
+        "y_topo_tubete_altura": int(y_topo_tubete_altura),
         "bbox_tubete": bbox_tubete,
         "x_centro_tubete": x_centro_tubete,
         "y_limite_planta": int(y_limite_planta),
+        "y_limite_altura": int(y_limite_altura),
         "confianca_tubete": confianca_tubete,
         "metodo_tubete": metodo_tubete,
         "debug_tubete": debug_tubete,
+        "debug_recuperacao_boca": debug_recuperacao_boca,
         "mask_boca_removida": mask_boca_removida,
+        "mask_boca_recuperada": mask_boca_recuperada,
         "ponto_base": ponto_base,
         "mask_planta_acima": mask_planta_acima,
         "mask_comprimento_total": mask_comprimento_total,

@@ -96,7 +96,7 @@ def processar_debug(path_img: str, out_dir: str) -> None:
         dados["mask_planta_acima"],
         dados["ponto_base"],
         mask_objetos=dados["mask_objetos"],
-        y_topo_tubete=int(dados["y_topo_tubete"]),
+        y_topo_tubete=int(dados.get("y_topo_tubete_altura", dados["y_topo_tubete"])),
         img_bgr=dados["img_bgr"],
         x_centro_tubete=int(dados["x_centro_tubete"]),
         mask_caule=dados["mask_caule"],
@@ -105,7 +105,7 @@ def processar_debug(path_img: str, out_dir: str) -> None:
         dados["mask_planta_acima"],
         dados["ponto_base"],
         mask_objetos=dados["mask_objetos"],
-        y_topo_tubete=int(dados["y_topo_tubete"]),
+        y_topo_tubete=int(dados.get("y_topo_tubete_altura", dados["y_topo_tubete"])),
         img_bgr=dados["img_bgr"],
         x_centro_tubete=int(dados["x_centro_tubete"]),
         mask_caule=dados["mask_caule"],
@@ -178,7 +178,7 @@ def processar_debug(path_img: str, out_dir: str) -> None:
     _salvar(out / "overlay_folhas.png", overlay_folhas)
 
     # Debug de candidatos de base do caule (quando disponivel).
-    y_limite = int(dados.get("y_limite_planta", int(dados["y_topo_tubete"]) - 5))
+    y_limite = int(dados.get("y_limite_altura", dados.get("y_limite_planta", int(dados["y_topo_tubete"]) - 5)))
     overlay_cands = img.copy()
     cv2.line(overlay_cands, (0, int(dados["y_topo_tubete"])), (overlay_cands.shape[1] - 1, int(dados["y_topo_tubete"])), (0, 0, 255), 2)
     cv2.line(overlay_cands, (0, y_limite), (overlay_cands.shape[1] - 1, y_limite), (0, 255, 255), 2)

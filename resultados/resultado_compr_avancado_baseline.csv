@@ -1,6 +1,0 @@
-imagem,comprimento_caule_px,area_planta,ponto_inicio,ponto_final,score,fallback,motivo_fallback,skeleton_reparado_usado,avaliacao_visual,overlay
-Eucalipto1,837.5,61745,"(1521, 2485)","(1434, 1765)",983.644,False,,True,requer_inspecao_manual,debug_saida/compr_avancado_baseline/Eucalipto1/overlay_caule_skeleton_score.png
-Eucalipto2,1177.879,210713,"(1582, 2476)","(1752, 1452)",696.15,False,,True,requer_inspecao_manual,debug_saida/compr_avancado_baseline/Eucalipto2/overlay_caule_skeleton_score.png
-Eucalipto3,692.122,188182,"(1523, 2491)","(1364, 1940)",674.965,False,,True,requer_inspecao_manual,debug_saida/compr_avancado_baseline/Eucalipto3/overlay_caule_skeleton_score.png
-Eucalipto4,674.446,48534,"(1554, 2518)","(1708, 1917)",690.903,False,,True,requer_inspecao_manual,debug_saida/compr_avancado_baseline/Eucalipto4/overlay_caule_skeleton_score.png
-Eucalipto5,301.931,28255,"(1559, 2490)","(1715, 2308)",308.976,False,,True,requer_inspecao_manual,debug_saida/compr_avancado_baseline/Eucalipto5/overlay_caule_skeleton_score.png

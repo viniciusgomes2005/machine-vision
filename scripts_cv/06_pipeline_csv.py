@@ -191,7 +191,7 @@ def processar_imagem(path: str, debug_dir: str | None = None) -> Dict[str, int |
         mask_planta,
         ponto_base,
         mask_objetos=dados["mask_objetos"],
-        y_topo_tubete=int(dados["y_topo_tubete"]),
+        y_topo_tubete=int(dados.get("y_topo_tubete_altura", dados["y_topo_tubete"])),
         img_bgr=dados["img_bgr"],
         x_centro_tubete=int(dados["x_centro_tubete"]),
         mask_caule=dados["mask_caule"],
