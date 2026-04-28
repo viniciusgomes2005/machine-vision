@@ -1,3 +1,18 @@
+"""
+Etapa 8 - comprimento avançado.
+
+O comprimento avançado tenta medir o caminho principal do caule, não apenas a
+altura vertical. A base vem da etapa 1 e o caminho é escolhido no skeleton da
+planta. Como folhas e ramificacoes tambem entram no skeleton, o código pontua os
+caminhos favorecendo subida vertical, proximidade do eixo do caule e progresso
+consistente, e penalizando desvios laterais ou trechos que parecem folha.
+
+Eu tinha achado a ideia inteligente, honestamente... não sei se funcionou bem...
+
+Quando o skeleton está quebrado, uso um eixo suave por bandas como apoio. Para
+mudas pequenas há limites proprios, porque poucos pixels mudam muito a medida.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -11,52 +26,52 @@ from typing import Dict, Iterable, List, Tuple
 import cv2
 import numpy as np
 
-PODA_RAMO_CURTO_PX = 12
-FAIXA_BASE_SEED_PX = 12
-GANHO_VERTICAL_MIN_FRAC = 0.15
-COMPRIMENTO_MIN_FRAC = 0.15
-DESVIO_LATERAL_LIMITE_FRAC = 0.35
-DESVIO_LATERAL_LIMITE_ABS = 60.0
-DESVIO_LATERAL_PENALIDADE_FRAC = 0.25
-PROGRESSO_VERTICAL_MIN = 0.25
-PROGRESSO_VERTICAL_PENALIDADE_BASE = 0.35
-PROGRESSO_VERTICAL_ALVO = 0.52
-PESO_PROGRESSO_VERTICAL_SCORE = 95.0
-PESO_COMPRIMENTO_EXCESSIVO_SCORE = 0.55
-SKELETON_REPARO_VERTICAL_FRAC = 0.20
-SKELETON_REPARO_HORIZONTAL_FRAC = 0.04
-RAIO_FOLHA_EXCESSO_PX = 6.0
-PENALIDADE_CAMINHO_FOLHA = 0.85
-PENALIDADE_ENDPOINT_FOLHA = 18.0
-PESO_SUBIDA_SCORE = 1.20
-PESO_COMPRIMENTO_SCORE = 0.45
-PESO_DESVIO_LATERAL_SCORE = 0.35
-PESO_DESVIO_LATERAL_EXCESSIVO = 1.5
-ALTURA_MAX_MUDA_PEQUENA_PX = 360
-MIN_PIXELS_ANTES_RAMIFICACAO = 12
-ENDPOINT_TOPO_BANDA_FRAC = 0.10
-ENDPOINT_TOPO_PROG_MIN = 0.45
-SUAVIZACAO_CAMINHO_FRAC = 0.012
-SUAVIZACAO_CAMINHO_MIN_PX = 5.0
-SUAVIZACAO_CAMINHO_MAX_PX = 18.0
-CORREDOR_CAULE_FRAC = 0.035
-CORREDOR_CAULE_MIN_PX = 14
-CORREDOR_CAULE_MAX_PX = 45
-EIXO_BANDA_PX = 10
-EIXO_BEAM_WIDTH = 48
-EIXO_CLUSTER_GAP_PX = 18
-EIXO_LARGURA_REL_MAX = 0.30
-EIXO_DIST_FOLHA_PX = 7.0
-EIXO_MIN_PONTOS = 4
-CORTE_TERMINAL_MIN_FRAC = 0.55
-CORTE_TERMINAL_LARGURA_FRAC = 0.09
-CORTE_TERMINAL_ESPESSURA_PX = 9.5
-CORTE_TERMINAL_RUN = 2
-CORTE_TERMINAL_FRAC_SEGMENTO = 0.45
-AJUSTE_EIXO_LARGO_FRAC_ALTURA = 0.095
-AJUSTE_EIXO_LARGO_RAZAO_MIN = 0.55
-MUDA_PEQUENA_COMPR_MIN_PX = 72.0
-MUDA_PEQUENA_EXTENSAO_MAX_PX = 46.0
+PODA_RAMO_CURTO_PX = 12  # remove pontas curtas do skeleton
+FAIXA_BASE_SEED_PX = 12  # faixa perto da base usada como semente do caminho
+GANHO_VERTICAL_MIN_FRAC = 0.15  # subida minima relativa para aceitar caminho
+COMPRIMENTO_MIN_FRAC = 0.15  # comprimento minimo relativo a altura da planta
+DESVIO_LATERAL_LIMITE_FRAC = 0.35  # desvio lateral relativo tolerado
+DESVIO_LATERAL_LIMITE_ABS = 60.0  # desvio lateral absoluto tolerado
+DESVIO_LATERAL_PENALIDADE_FRAC = 0.25  # quando comeca a penalidade lateral
+PROGRESSO_VERTICAL_MIN = 0.25  # progresso vertical minimo do caminho
+PROGRESSO_VERTICAL_PENALIDADE_BASE = 0.35  # base da penalidade por pouco progresso
+PROGRESSO_VERTICAL_ALVO = 0.52  # progresso vertical considerado saudavel
+PESO_PROGRESSO_VERTICAL_SCORE = 95.0  # peso do progresso vertical no score
+PESO_COMPRIMENTO_EXCESSIVO_SCORE = 0.55  # penaliza caminho longo demais
+SKELETON_REPARO_VERTICAL_FRAC = 0.20  # reparo vertical maximo relativo
+SKELETON_REPARO_HORIZONTAL_FRAC = 0.04  # reparo horizontal maximo relativo
+RAIO_FOLHA_EXCESSO_PX = 6.0  # raio usado para detectar excesso em folha
+PENALIDADE_CAMINHO_FOLHA = 0.85  # custo extra ao atravessar regiao de folha
+PENALIDADE_ENDPOINT_FOLHA = 18.0  # penalidade para terminar em folha
+PESO_SUBIDA_SCORE = 1.20  # peso da subida no score do endpoint
+PESO_COMPRIMENTO_SCORE = 0.45  # peso do comprimento util no score
+PESO_DESVIO_LATERAL_SCORE = 0.35  # peso do desvio lateral no score
+PESO_DESVIO_LATERAL_EXCESSIVO = 1.5  # penalidade forte para desvio lateral grande
+ALTURA_MAX_MUDA_PEQUENA_PX = 360  # limite para estrategia de muda pequena
+MIN_PIXELS_ANTES_RAMIFICACAO = 12  # trecho minimo antes de considerar ramificacao
+ENDPOINT_TOPO_BANDA_FRAC = 0.10  # banda superior usada para endpoint de topo
+ENDPOINT_TOPO_PROG_MIN = 0.45  # progresso minimo para endpoint de topo
+SUAVIZACAO_CAMINHO_FRAC = 0.012  # suavizacao relativa do caminho final
+SUAVIZACAO_CAMINHO_MIN_PX = 5.0  # suavizacao minima em pixels
+SUAVIZACAO_CAMINHO_MAX_PX = 18.0  # suavizacao maxima em pixels
+CORREDOR_CAULE_FRAC = 0.035  # largura relativa do corredor do caule
+CORREDOR_CAULE_MIN_PX = 14  # largura minima do corredor
+CORREDOR_CAULE_MAX_PX = 45  # largura maxima do corredor
+EIXO_BANDA_PX = 10  # altura de cada banda para estimar eixo suave
+EIXO_BEAM_WIDTH = 48  # largura do feixe de candidatos do eixo
+EIXO_CLUSTER_GAP_PX = 18  # separacao maxima entre pontos de um cluster
+EIXO_LARGURA_REL_MAX = 0.30  # largura relativa maxima para ponto de eixo
+EIXO_DIST_FOLHA_PX = 7.0  # distancia usada para afastar eixo de folha
+EIXO_MIN_PONTOS = 4  # minimo de pontos para aceitar eixo suave
+CORTE_TERMINAL_MIN_FRAC = 0.55  # trecho minimo antes de cortar final ruim
+CORTE_TERMINAL_LARGURA_FRAC = 0.09  # largura relativa que indica terminal largo
+CORTE_TERMINAL_ESPESSURA_PX = 9.5  # espessura que indica entrada em folha
+CORTE_TERMINAL_RUN = 2  # linhas consecutivas para confirmar corte terminal
+CORTE_TERMINAL_FRAC_SEGMENTO = 0.45  # fracao do segmento usada no corte
+AJUSTE_EIXO_LARGO_FRAC_ALTURA = 0.095  # ajuste quando eixo ficou largo demais
+AJUSTE_EIXO_LARGO_RAZAO_MIN = 0.55  # razao minima para aplicar esse ajuste
+MUDA_PEQUENA_COMPR_MIN_PX = 72.0  # comprimento minimo para muda pequena
+MUDA_PEQUENA_EXTENSAO_MAX_PX = 46.0  # extensao maxima permitida em muda pequena
 
 
 def _load_module(path: Path, module_name: str):

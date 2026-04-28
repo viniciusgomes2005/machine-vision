@@ -1,3 +1,10 @@
+"""
+Debug de uma imagem isolada.
+
+Ele nao muda a logica da pipeline; apenas chama as mesmas funcoes e salva
+overlays em uma pasta de debug.
+"""
+
 from __future__ import annotations
 
 import argparse

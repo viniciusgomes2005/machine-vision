@@ -1,3 +1,13 @@
+"""
+Etapa 5 - numero de folhas.
+
+A contagem usa a máscara foliar da etapa anterior. A estratégia principal é
+contar componentes conectados depois de uma abertura morfológica. Como algumas
+folhas encostam, escolhemos kernels diferentes conforme o tamanho/área da muda.
+Para mudas pequenas tambem verificamos contornos de acordo: um componente grande
+com uma concavidade profunda pode representar duas folhas grudadas. Ficamos fazendo até funcionar bem e, pelo que aparenta, ficou LINDO!
+"""
+
 from __future__ import annotations
 
 from typing import Dict, Tuple
@@ -5,16 +15,16 @@ from typing import Dict, Tuple
 import cv2
 import numpy as np
 
-AREA_MIN_FOLHA_COUNT = 250
-AREA_MIN_FOLHA_FRACA = 150
-AREA_MUDA_PEQUENA = 35000
-AREA_MUDA_MUITO_PEQUENA = 22000
-AREA_MUDA_MEDIA = 80000
-AREA_MUDA_GRANDE = 100000
-COUNT_MIN_CONFIAVEL = 10
-RAZAO_COMPONENTE_DOMINANTE = 0.75
-AREA_MIN_COMPONENTE_BILOBADO = 3000
-DEFECT_PROFUNDIDADE_BILOBADO = 18.0
+AREA_MIN_FOLHA_COUNT = 250  # area minima normal para contar uma folha/componente
+AREA_MIN_FOLHA_FRACA = 150  # area minima relaxada para mudas menores
+AREA_MUDA_PEQUENA = 35000  # abaixo disso uso abertura mais forte se ha poucas folhas
+AREA_MUDA_MUITO_PEQUENA = 22000  # faixa onde vale testar componente bilobado
+AREA_MUDA_MEDIA = 80000  # limite para trocar estrategia de abertura
+AREA_MUDA_GRANDE = 100000  # acima disso folhas grudadas ficam mais provaveis
+COUNT_MIN_CONFIAVEL = 10  # contagem minima para aceitar a abertura leve
+RAZAO_COMPONENTE_DOMINANTE = 0.75  # componente dominante indica folhas grudadas
+AREA_MIN_COMPONENTE_BILOBADO = 3000  # contorno grande o suficiente para testar bilobo
+DEFECT_PROFUNDIDADE_BILOBADO = 18.0  # profundidade minima da concavidade entre duas folhas
 
 
 def _abrir(mask_folhas: np.ndarray, kernel_size: int) -> np.ndarray:

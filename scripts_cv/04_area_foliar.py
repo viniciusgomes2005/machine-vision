@@ -1,16 +1,29 @@
+"""
+Etapa 4 - area foliar.
+
+A área foliar vem da mascara da planta sem o caule, claro. Primeiro há reforço da máscara
+do caule com o skeleton, porque o caule pode ficar fino ou quebrado. Depois tiramos
+esse caule da planta, limpamos componentes muito pequenos, fechamos pequenas falhas e
+preenchemos contornos das folhas. A área final é simplesmente a contagem de pixels
+positivos da mascara de folhas.
+Visualmente ainda pegamos o caule. Em iterações anteriores, no trabalho que descartamos, tirávamos bem melhor. Entretanto,
+acho que mediamos a imagem distorcida de alguma forma e ficávamos muito longe de sua referência, Dinho. O atual pega o caule visualmente, porém fica muito mais próximo do 
+que devia!
+"""
+
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
-AREA_MIN_FOLHA = 40
-AREA_MIN_CONTORNO = 30
-CAULE_DILATE_KERNEL = (7, 7)
-CAULE_CLOSE_VERTICAL_KERNEL = (5, 25)
-SKELETON_DILATE_KERNEL = (5, 5)
-PLANTA_ESPARSAR_AREA_MAX = 55000
-PLANTA_ESPARSAR_ALTURA_MIN = 780
-CAULE_ALTURA_FRAC_MIN = 0.20
+AREA_MIN_FOLHA = 40  # menor componente preservado como folha
+AREA_MIN_CONTORNO = 30  # menor contorno preenchido na mascara final
+CAULE_DILATE_KERNEL = (7, 7)  # engrossa o caule para remove-lo da area foliar
+CAULE_CLOSE_VERTICAL_KERNEL = (5, 25)  # fecha falhas verticais do caule
+SKELETON_DILATE_KERNEL = (5, 5)  # tolerancia para juntar skeleton e caule estimado
+PLANTA_ESPARSAR_AREA_MAX = 55000  # area maxima para tratar muda alta e esparsa
+PLANTA_ESPARSAR_ALTURA_MIN = 780  # altura minima da muda alta e esparsa
+CAULE_ALTURA_FRAC_MIN = 0.20  # caule menor que isso e considerado curto demais
 
 
 def _kernel(size):

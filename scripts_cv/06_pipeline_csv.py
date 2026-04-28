@@ -1,3 +1,17 @@
+"""
+Etapa 6 - pipeline e CSV.
+
+Este arquivo junta as etapas anteriores em uma unica rotina: tratamentos
+iniciais, altura vertical, diametro, area foliar, numero de folhas e comprimento
+avancado. A funcao principal para uma imagem e `processar_imagem`; ela devolve
+um dicionario com todas as medidas no mesmo formato usado nos CSVs.
+
+Tambem deixei aqui a avaliacao contra as referencias dos cinco primeiros
+eucaliptos, porque isso facilita conferir rapidamente se as metricas passam nos
+limites da rubrica. As imagens extras rodam pelo mesmo codigo, apenas nao entram
+no MAPE oficial porque, claro, só temos 5 eucaliptos de referência.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -11,16 +25,16 @@ import cv2
 import numpy as np
 
 COLUNAS_CSV = ["Img", "Altura Vert.", "Compr Total", "Diâmetro", "Área", "Nro Folhas"]
-ALTURA_MAX_MUDA_PEQUENA = 360
-MARGEM_MUDA_PEQUENA_FRAC = 0.28
-FRAGMENTADA_AREA_RATIO_MAX = 0.80
-FRAGMENTADA_MARGEM_FRAC = 0.03
-CAULE_SEPARADO_LARGURA_MAX = 700
-CAULE_SEPARADO_MARGEM_FRAC = 0.10
-CONTINUA_MEDIA_LARGURA_MIN = 900
-CONTINUA_MEDIA_LARGURA_MAX = 1100
-CONTINUA_MEDIA_AREA_RATIO_MIN = 0.80
-CONTINUA_MEDIA_SUPORTE_MIN = 4
+ALTURA_MAX_MUDA_PEQUENA = 360  # abaixo disso o comprimento usa a mascara inteira da muda
+MARGEM_MUDA_PEQUENA_FRAC = 0.28  # margem lateral relativa para muda pequena
+FRAGMENTADA_AREA_RATIO_MAX = 0.80  # maior componente abaixo disso indica mascara fragmentada
+FRAGMENTADA_MARGEM_FRAC = 0.03  # margem extra para mascara fragmentada
+CAULE_SEPARADO_LARGURA_MAX = 700  # largura maxima para caso de caule separado
+CAULE_SEPARADO_MARGEM_FRAC = 0.10  # margem extra quando o caule esta separado do componente maior
+CONTINUA_MEDIA_LARGURA_MIN = 900  # inicio da faixa de mascara continua media
+CONTINUA_MEDIA_LARGURA_MAX = 1100  # fim da faixa de mascara continua media
+CONTINUA_MEDIA_AREA_RATIO_MIN = 0.80  # maior componente precisa dominar nessa estrategia
+CONTINUA_MEDIA_SUPORTE_MIN = 4  # suporte minimo de colunas para aceitar ajuste continuo
 
 REFERENCIAS_EUCALIPTO = {
     "Eucalipto1": {"Altura Vert.": 772, "Compr Total": 697, "Diâmetro": 12, "Área": 62484, "Nro Folhas": [11, 12]},

@@ -1,3 +1,15 @@
+"""
+Etapa 2 - altura vertical.
+
+Aqui medimos a distância vertical entre a base da muda, perto do coleto, e o
+ponto mais alto da planta. A máscara ja chega sem o vaso pela etapa 1, mas ainda
+assim recalculamos a base com cuidado: buscamos segmentos estreitos acima do topo
+do tubete, priorizamos o que tem suporte vertical de caule e usamos objeto original
+como apoio quando a máscara dá errado. Novamente, o vaso foi um sofrimento sem fim nessa etapa.
+
+O resultado é a altura em pixels no referencial original da imagem. 
+"""
+
 from __future__ import annotations
 
 from typing import Optional, Tuple
@@ -5,27 +17,27 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-BASE_SCAN_UP = 40
-BASE_SCAN_DOWN = 0
-MARGEM_SEGURA_VASO = 5
-MAX_BASE_WIDTH = 32
-SEED_HALF_W = 8
-SEED_HALF_H = 4
-AREA_MIN_CONNECTED = 35
-MAX_CANDIDATOS = 80
-BASE_TRACK_HALF_W = 4
-BASE_RESIDUO_GAP_MAX = 8
-BASE_RESIDUO_W_MAX = 2
-BASE_RESIDUO_TOPO_DELTA_MIN = 90
-BASE_RESIDUO_TOPO_DELTA_MAX = 260
-BASE_RESIDUO_SUBIR_FRAC = 0.042
-BASE_RESIDUO_SUBIR_MIN = 18
-BASE_RESIDUO_SUBIR_MAX = 42
-STEM_INVISIBLE_GAP = 10
-HSV_BLUE_LOW = np.array([75, 40, 40], dtype=np.uint8)
-HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)
-TOP_RAW_HALF_W = 90
-TOP_RAW_AREA_MIN = 12
+BASE_SCAN_UP = 40  # faixa acima do vaso onde a base do caule pode aparecer
+BASE_SCAN_DOWN = 0  # mantido como folga inferior historica
+MARGEM_SEGURA_VASO = 5  # evita medir pixels da borda do vaso
+MAX_BASE_WIDTH = 32  # largura maxima para um segmento ser base de caule
+SEED_HALF_W = 8  # meia largura da semente para achar componente conectado
+SEED_HALF_H = 4  # meia altura da semente para achar componente conectado
+AREA_MIN_CONNECTED = 35  # menor componente usado para buscar topo conectado
+MAX_CANDIDATOS = 80  # limite de candidatos de base avaliados
+BASE_TRACK_HALF_W = 4  # corredor usado para descer a base no mesmo eixo
+BASE_RESIDUO_GAP_MAX = 8  # gap maximo para detectar residuo grudado no vaso
+BASE_RESIDUO_W_MAX = 2  # largura maxima do residuo fino na base
+BASE_RESIDUO_TOPO_DELTA_MIN = 90  # diferenca minima para aplicar correcao de residuo
+BASE_RESIDUO_TOPO_DELTA_MAX = 260  # diferenca maxima para aplicar correcao de residuo
+BASE_RESIDUO_SUBIR_FRAC = 0.042  # quanto subir proporcionalmente quando ha residuo
+BASE_RESIDUO_SUBIR_MIN = 18  # correcao minima de base por residuo
+BASE_RESIDUO_SUBIR_MAX = 42  # correcao maxima de base por residuo
+STEM_INVISIBLE_GAP = 10  # tolerancia historica para pequeno buraco no caule
+HSV_BLUE_LOW = np.array([75, 40, 40], dtype=np.uint8)  # fundo azul, limite inferior
+HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)  # fundo azul, limite superior
+TOP_RAW_HALF_W = 90  # janela lateral para recuperar topo no objeto bruto
+TOP_RAW_AREA_MIN = 12  # menor componente aceito nessa recuperacao do topo
 
 
 def _segmentos_horizontais(row_bool: np.ndarray):

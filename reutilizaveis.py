@@ -1,44 +1,6 @@
 """
-reutilizaveis.py
+Das nossas tentativas antigas o que pode ajudar
 
-Biblioteca mínima de funções reutilizáveis para o projeto de Visão de Máquinas
-(inspeção de mudas).
-
-Este arquivo NÃO resolve o projeto inteiro. Ele contém apenas blocos pequenos,
-genéricos e seguros que serão chamados pelos scripts específicos:
-
-    01_tratamentos_iniciais.py
-    02_comprimento_vertical.py
-    03_diametro_coleto.py
-    04_area_foliar.py
-    05_numero_folhas.py
-    06_pipeline_csv.py
-
-Decisão central do projeto
---------------------------
-Todas as medições finais devem ocorrer no referencial da imagem original.
-
-Isso significa:
-
-1. Não medir em imagem redimensionada.
-2. Não medir em máscara redimensionada.
-3. Não medir em imagem deformada por escala, rotação, perspectiva ou warp.
-4. Resize só deve existir fora deste arquivo, se for necessário apenas para
-   visualização local.
-5. Crop sem resize não deforma a área, mas muda o shape. Portanto, se uma etapa
-   trabalhar em crop, a máscara do crop deve ser recolocada em um canvas do
-   tamanho original antes da medição final.
-
-Por que essa rigidez?
----------------------
-A área foliar é contagem de pixels. Se a máscara tiver outro tamanho, a área
-fica automaticamente em outra escala. Altura, diâmetro e comprimento também
-ficam em outro sistema de coordenadas. Para evitar correções posteriores,
-o projeto adotará uma regra simples: medir tudo no tamanho original.
-
-As funções abaixo foram escritas como utilidades genéricas. Elas não carregam
-parâmetros calibrados, não fazem debug visual e não implementam uma solução
-fechada para nenhuma imagem específica.
 """
 
 from __future__ import annotations

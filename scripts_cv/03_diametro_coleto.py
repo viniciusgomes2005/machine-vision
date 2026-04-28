@@ -1,3 +1,13 @@
+"""
+Etapa 3 - diametro do coleto.
+
+O diametro é medido como a largura horizontal do caule perto da saida do vaso.
+Olhamos uma pequena janela acima do topo do tubete, 10 pixels como pedido pelo Dinho pelo que falaram, selecionamos segmentos estreitos
+e próximos do eixo do caule, e usámos a mascara de caule como referencia quando ela
+esta disponivel. No fim há um percentil das larguras validas para não depender
+de uma eventual linha ruidosa.
+"""
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
@@ -5,14 +15,14 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-OFFSET_ACIMA_VASO_PX = 10
-JANELA_DEFAULT = (-(OFFSET_ACIMA_VASO_PX + 4), 0)
-LARGURA_MAX_FRAC = 0.08
-DIST_MAX_FRAC = 0.10
-EXPANSAO_MAX = 20
-HALF_WINDOW_X = 10
-DILATE_ITERS = 2
-DIAM_PERCENTIL = 60
+OFFSET_ACIMA_VASO_PX = 10  # distancia acima do vaso onde o coleto costuma estar
+JANELA_DEFAULT = (-(OFFSET_ACIMA_VASO_PX + 4), 0)  # janela vertical medida a partir do topo do vaso
+LARGURA_MAX_FRAC = 0.08  # largura maxima relativa para aceitar segmento como caule
+DIST_MAX_FRAC = 0.10  # distancia maxima relativa ao eixo esperado
+EXPANSAO_MAX = 20  # expansao maxima da janela quando faltam linhas boas
+HALF_WINDOW_X = 10  # meia janela horizontal ao redor do eixo do caule
+DILATE_ITERS = 2  # dilatacao usada no debug/apoio visual
+DIAM_PERCENTIL = 60  # percentil das larguras validas usado como diametro final
 
 
 def _segmentos_horizontais(row_bool: np.ndarray) -> List[Tuple[int, int]]:

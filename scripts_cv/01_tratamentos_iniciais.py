@@ -1,3 +1,21 @@
+"""
+Etapa 1 - tratamentos iniciais.
+
+Aqui transformamos a imagem original em mascaras confiaveis para as outras
+medidas. A ideia geral foi:
+
+1. separar o fundo azul dos objetos;
+2. detectar o tubete/vaso pela regiao inferior da imagem;
+3. cortar a planta acima da boca do vaso, sem deixar o vaso entrar na mascara;
+4. limpar residuos da borda do vaso que parecem caule/folha;
+5. estimar o ponto de base do caule e uma mascara de caule para as proximas etapas.
+
+O ponto mais delicado é a detecção do topo do vaso. Essencial em TODOS os exercícios. Em algumas imagens a planta
+encosta visualmente no tubete, entao uma mascara simples pode confundir folha,
+caule e vaso como um objeto só. Por isso o codigo usa geometria, cor escura do
+tubete e largura de segmentos para decidir onde realmente comeca o vaso. A regra é geral, entretanto: não há exceção por número de eucalipto.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,52 +24,52 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-HSV_BLUE_LOW = np.array([75, 40, 40], dtype=np.uint8)
-HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)
-K_OPEN = (3, 3)
-K_CLOSE = (7, 7)
-AREA_MIN_OBJ = 40
-AREA_MIN_TUBETE = 1500
-MARGEM_ACIMA_TUBETE = 2
-MARGEM_SEGURA_VASO = 5
-BASE_BAND_UP = 22
-BASE_BAND_DOWN = 2
-BASE_HALF_WIDTH_KEEP = 16
-MAX_LARGURA_BASE_COLETO = 30
-BOCA_PIX_ACIMA = 26
-BOCA_PIX_ABAIXO = 16
-BOCA_MEIA_LARGURA = 180
-HSV_VASO_S_MAX = 120
-HSV_VASO_V_MAX = 145
-MIN_SUPORTE_VERTICAL = 12
-ALTURA_SUPORTE_VERTICAL = 35
-MEIA_LARGURA_SUPORTE = 4
-ROI_INICIO_TUBETE_FRAC = 0.45
-LARGURA_MIN_TUBETE_FRAC = 0.08
-LINHAS_CONSECUTIVAS_TOPO = 8
-OFFSET_Y_BORDA_TRASEIRA = 2
-PERSISTENCIA_BORDA_TRASEIRA = 4
-OFFSET_Y_MEDIA_CONFIANCA = 6
-OFFSET_Y_BAIXA_CONFIANCA = 2
-BASE_SEED_BAND = 120
-RESIDUO_BASE_BANDA_ALTURA = 76
-RESIDUO_BASE_COMP_MAX_H = 14
-RESIDUO_BASE_RATIO_MIN = 4.0
-RESIDUO_BASE_MAIN_LARGURA_MIN = 24
-RESIDUO_BASE_MAIN_KEEP_HALF = 8
-RESIDUO_BASE_PODA_FAIXA_FINAL = 44
-COMPRIMENTO_BASE_BAND = 8
-COMPRIMENTO_BASE_AREA_MIN = 15
-COMPRIMENTO_BASE_WIDTH_MIN = 18
-COMPRIMENTO_BASE_HEIGHT_MAX = 12
-CAULE_BANDA_PX = 10
-CAULE_BEAM_WIDTH = 40
-CAULE_CLUSTER_GAP_PX = 16
-CAULE_LARGURA_MAX_FRAC = 0.28
-CAULE_MIN_PONTOS_EIXO = 4
-CAULE_SUAVIZACAO_FRAC = 0.012
-CAULE_DESVIO_LATERAL_MAX_FRAC = 0.78
-CAULE_DESVIO_LATERAL_MAX_ABS = 920
+HSV_BLUE_LOW = np.array([75, 40, 40], dtype=np.uint8)  # limite inferior do fundo azul em HSV
+HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)  # limite superior do fundo azul em HSV
+K_OPEN = (3, 3)  # abertura leve para tirar ruido pequeno
+K_CLOSE = (7, 7)  # fechamento leve para tapar falhas pequenas
+AREA_MIN_OBJ = 40  # menor componente aceito como objeto depois de remover o fundo
+AREA_MIN_TUBETE = 1500  # area minima esperada para o corpo do tubete
+MARGEM_ACIMA_TUBETE = 2  # folga historica acima do tubete
+MARGEM_SEGURA_VASO = 5  # pixels cortados acima do topo do vaso para nao medir a borda
+BASE_BAND_UP = 22  # faixa acima do vaso usada para podar tampa/residuo
+BASE_BAND_DOWN = 2  # pequena tolerancia abaixo do topo detectado do vaso
+BASE_HALF_WIDTH_KEEP = 16  # meia largura preservada perto do caule na poda da tampa
+MAX_LARGURA_BASE_COLETO = 30  # segmento mais largo que isso perto da base tende a ser vaso/folha
+BOCA_PIX_ACIMA = 26  # quanto procurar acima do topo do vaso para remover boca/tampa
+BOCA_PIX_ABAIXO = 16  # quanto procurar abaixo do topo do vaso para remover boca/tampa
+BOCA_MEIA_LARGURA = 180  # janela horizontal central da boca do vaso
+HSV_VASO_S_MAX = 120  # saturacao maxima para considerar pixel escuro/cinzento de vaso
+HSV_VASO_V_MAX = 145  # brilho maximo para considerar pixel escuro do vaso/tubete
+MIN_SUPORTE_VERTICAL = 12  # minimo de pixels acima para aceitar uma base como caule
+ALTURA_SUPORTE_VERTICAL = 35  # altura da janela de suporte vertical do caule
+MEIA_LARGURA_SUPORTE = 4  # meia largura da janela de suporte vertical
+ROI_INICIO_TUBETE_FRAC = 0.45  # o tubete sempre deve estar na metade inferior da imagem
+LARGURA_MIN_TUBETE_FRAC = 0.08  # largura minima relativa para uma linha parecer corpo de vaso
+LINHAS_CONSECUTIVAS_TOPO = 8  # persistencia vertical minima para aceitar topo do vaso
+OFFSET_Y_BORDA_TRASEIRA = 2  # ajuste fino da borda traseira quando ela aparece clara
+PERSISTENCIA_BORDA_TRASEIRA = 4  # numero de linhas coerentes para confiar na borda traseira
+OFFSET_Y_MEDIA_CONFIANCA = 6  # ajuste usado quando a borda aparece com confianca media
+OFFSET_Y_BAIXA_CONFIANCA = 2  # ajuste conservador quando a borda traseira nao e confiavel
+BASE_SEED_BAND = 120  # faixa de busca de componentes conectados perto da base
+RESIDUO_BASE_BANDA_ALTURA = 76  # altura da faixa onde residuos horizontais do vaso aparecem
+RESIDUO_BASE_COMP_MAX_H = 14  # altura maxima para residuo fino de base
+RESIDUO_BASE_RATIO_MIN = 4.0  # razao largura/altura para classificar barra horizontal
+RESIDUO_BASE_MAIN_LARGURA_MIN = 24  # largura minima da regiao principal preservada na base
+RESIDUO_BASE_MAIN_KEEP_HALF = 8  # corredor central preservado ao limpar residuo
+RESIDUO_BASE_PODA_FAIXA_FINAL = 44  # faixa final onde barras de rodape sao removidas
+COMPRIMENTO_BASE_BAND = 8  # faixa usada para recuperar extremos no comprimento
+COMPRIMENTO_BASE_AREA_MIN = 15  # menor componente aceito nessa recuperacao
+COMPRIMENTO_BASE_WIDTH_MIN = 18  # largura minima de base recuperavel para comprimento
+COMPRIMENTO_BASE_HEIGHT_MAX = 12  # altura maxima de residuo recuperavel para comprimento
+CAULE_BANDA_PX = 10  # altura de cada banda na estimativa do eixo do caule
+CAULE_BEAM_WIDTH = 40  # largura maxima do feixe de candidatos por banda
+CAULE_CLUSTER_GAP_PX = 16  # separacao maxima para juntar pontos do eixo
+CAULE_LARGURA_MAX_FRAC = 0.28  # largura relativa maxima para ainda parecer caule
+CAULE_MIN_PONTOS_EIXO = 4  # minimo de pontos para aceitar o eixo estimado
+CAULE_SUAVIZACAO_FRAC = 0.012  # suavizacao relativa do eixo do caule
+CAULE_DESVIO_LATERAL_MAX_FRAC = 0.78  # desvio lateral relativo maximo permitido
+CAULE_DESVIO_LATERAL_MAX_ABS = 920  # limite absoluto de desvio lateral
 
 
 def _odd(v: int) -> int:
@@ -434,6 +452,45 @@ def _refinar_topo_borda_traseira(
     }
 
 
+def _estimar_topo_vaso_escuro_abaixo(
+    img_bgr: np.ndarray,
+    mask_objetos: np.ndarray,
+    y_inicio: int,
+    x_centro_ref: int,
+    bbox_corpo: Tuple[int, int, int, int],
+) -> Optional[int]:
+    # Correcao geral para quando folha/caule grudam no tubete: se a borda
+    # traseira subiu demais, procuro abaixo dela uma faixa escura e larga,
+    # que e muito mais parecida com o corpo real do vaso do que com folha.
+    h, _ = mask_objetos.shape
+    _, _, bw, _ = bbox_corpo
+    bw = int(max(40, bw))
+
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+    mask_escura = ((s <= HSV_VASO_S_MAX) & (v <= HSV_VASO_V_MAX)).astype(np.uint8) * 255
+    mask_escura = cv2.bitwise_and(mask_escura, mask_objetos)
+    mask_escura = cv2.morphologyEx(mask_escura, cv2.MORPH_CLOSE, _kernel((5, 3)))
+
+    largura_min = int(max(86, 0.16 * bw))
+    x_tol = int(max(42, 0.22 * bw))
+    y0 = max(0, min(h - 1, int(y_inicio)))
+    y1 = min(h - 1, y0 + 320)
+
+    for y in range(y0, y1 + 1):
+        seg = _segmento_principal_linha(mask_escura, y, x_ref=int(x_centro_ref))
+        if seg is None:
+            continue
+        x0, x1 = seg
+        largura = int(x1 - x0 + 1)
+        xc = int((x0 + x1) / 2)
+        if largura >= largura_min and abs(xc - int(x_centro_ref)) <= x_tol:
+            return int(y)
+
+    return None
+
+
 def detectar_tubete_melhorado(
     img_bgr: np.ndarray,
     mask_objetos: np.ndarray,
@@ -474,13 +531,32 @@ def detectar_tubete_melhorado(
         "hits_borda_traseira": 0,
     }
     if confianca:
+        y_topo_frente_detectado = int(y_topo_func)
         y_refinado, dbg_borda = _refinar_topo_borda_traseira(
             mask_objetos=mask_objetos,
-            y_topo_frente=int(y_topo_func),
+            y_topo_frente=y_topo_frente_detectado,
             x_centro_ref=int(x_center_func),
             bbox_corpo=bbox_corpo,
         )
         y_topo_func = int(y_refinado)
+
+        subida_borda = int(y_topo_frente_detectado) - int(y_topo_func)
+        if subida_borda > 100:
+            # Subida grande demais e sinal de baixa confianca: em vez de aceitar
+            # esse topo alto, reconfirmo pelo corpo escuro/largo do tubete.
+            y_escuro = _estimar_topo_vaso_escuro_abaixo(
+                img_bgr=img_bgr,
+                mask_objetos=mask_objetos,
+                y_inicio=y_topo_frente_detectado,
+                x_centro_ref=int(x_center_func),
+                bbox_corpo=bbox_corpo,
+            )
+            if y_escuro is not None:
+                y_topo_func = int(y_escuro)
+                dbg_borda["y_topo_corrigido_vaso_escuro"] = int(y_escuro)
+            else:
+                y_topo_func = int(y_topo_frente_detectado)
+                dbg_borda["y_topo_corrigido_vaso_escuro"] = int(y_topo_func)
 
     mask_tubete = mask_corpo.copy()
     mask_tubete[: int(y_topo_func), :] = 0

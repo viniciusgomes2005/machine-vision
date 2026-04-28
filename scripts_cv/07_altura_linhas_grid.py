@@ -1,3 +1,12 @@
+"""
+Visualizacao auxiliar da altura vertical.
+
+Este script monta uma imagem em grade com a linha de altura desenhada para os
+eucaliptos. Ele nao participa do CSV final; serve para eu bater o olho e ver se
+a base, o topo e a linha vermelha estao coerentes em varias imagens ao mesmo
+tempo. 
+"""
+
 from __future__ import annotations
 
 import argparse
