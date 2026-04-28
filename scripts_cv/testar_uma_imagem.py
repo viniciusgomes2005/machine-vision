@@ -79,7 +79,11 @@ def processar_debug(path_img: str, out_dir: str) -> None:
     dados = M01.processar_tratamentos_iniciais(path_img, debug_dir=str(out))
 
     img = dados["img_bgr"]
-    mask_folhas = M04.obter_mascara_folhas(dados["mask_planta_acima"], dados["mask_caule"])
+    mask_folhas, debug_folhas = M04.obter_mascara_folhas_debug(
+        dados["mask_planta_acima"],
+        dados["mask_caule"],
+        skeleton=dados["skeleton"],
+    )
 
     altura = M02.medir_comprimento_vertical(
         dados["mask_planta_acima"],
@@ -107,27 +111,30 @@ def processar_debug(path_img: str, out_dir: str) -> None:
         mask_caule=dados["mask_caule"],
     )
     n_folhas = M05.contar_folhas(mask_folhas)
-    ys_planta, _ = np.where(dados["mask_planta_acima"] > 0)
-    if ys_planta.size > 0:
-        altura_base_mask = int(max(0, int(dados["ponto_base"][1]) - int(np.min(ys_planta))))
-    else:
-        altura_base_mask = int(altura)
-
-    compr_total_raw = M06.medir_comprimento_total(
-        dados["skeleton"],
-        dados["ponto_base"],
-        fallback=altura_base_mask,
+    mask_comprimento = dados.get("mask_comprimento_total", dados["mask_planta_acima"])
+    ys_compr, _ = np.where(dados["mask_planta_acima"] > 0)
+    if ys_compr.size > 0:
+        altura_mask_compr = int(np.max(ys_compr) - np.min(ys_compr) + 1)
+        if altura_mask_compr <= M06.ALTURA_MAX_MUDA_PEQUENA:
+            mask_comprimento = dados["mask_planta_acima"]
+    compr_total, info_compr = M06.medir_comprimento_total_debug(
+        mask_comprimento,
+        mask_caule=dados["mask_caule"],
+        x_ref=int(dados["x_centro_tubete"]),
+        y_topo_tubete=int(dados["y_topo_tubete"]),
     )
-    compr_total = int(altura_base_mask) if compr_total_raw < int(0.60 * max(altura_base_mask, 1)) else int(compr_total_raw)
 
     _salvar(out / "original.png", img)
     _salvar(out / "mask_fundo.png", dados["mask_fundo"])
     _salvar(out / "mask_objetos.png", dados["mask_objetos"])
     _salvar(out / "mask_tubete.png", dados["mask_tubete"])
     _salvar(out / "mask_planta_acima.png", dados["mask_planta_acima"])
+    _salvar(out / "mask_comprimento_total.png", mask_comprimento)
     _salvar(out / "skeleton.png", dados["skeleton"])
     _salvar(out / "mask_caule.png", dados["mask_caule"])
     _salvar(out / "mask_folhas.png", mask_folhas)
+    for nome, mask in debug_folhas.items():
+        _salvar(out / f"{nome}.png", mask)
 
     overlay_altura = img.copy()
     cv2.line(
@@ -140,6 +147,11 @@ def processar_debug(path_img: str, out_dir: str) -> None:
     cv2.circle(overlay_altura, (int(x_base_alt), int(y_base_alt)), 5, (0, 255, 255), -1)
     cv2.putText(overlay_altura, f"Altura Vert: {altura}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
     cv2.putText(overlay_altura, f"Compr Total: {compr_total}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (50, 240, 50), 2)
+    if info_compr["x0"] is not None:
+        x_min = int(info_compr["x0"])
+        x_max = int(info_compr["x1"])
+        y_cmp = int(info_compr["y"])
+        cv2.line(overlay_altura, (x_min, y_cmp), (x_max, y_cmp), (50, 240, 50), 2)
     _salvar(out / "overlay_altura_vertical.png", overlay_altura)
 
     overlay_diam = img.copy()

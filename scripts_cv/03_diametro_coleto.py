@@ -5,11 +5,14 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-JANELA_DEFAULT = (-14, -8)
+OFFSET_ACIMA_VASO_PX = 10
+JANELA_DEFAULT = (-(OFFSET_ACIMA_VASO_PX + 4), 0)
 LARGURA_MAX_FRAC = 0.08
 DIST_MAX_FRAC = 0.10
 EXPANSAO_MAX = 20
 HALF_WINDOW_X = 10
+DILATE_ITERS = 2
+DIAM_PERCENTIL = 60
 
 
 def _segmentos_horizontais(row_bool: np.ndarray) -> List[Tuple[int, int]]:
@@ -109,6 +112,23 @@ def _estimar_por_mascara(mask_base: np.ndarray, y_topo_tubete: int, x_ref: int):
     return diametro, linha
 
 
+def _estimar_no_intervalo(
+    mask_base: np.ndarray,
+    y_min: int,
+    y_max: int,
+    x_ref: int,
+    mask_caule: Optional[np.ndarray] = None,
+):
+    larguras, detalhes = _medir_larguras_validas(
+        mask_base, y_min, y_max, x_ref, mask_caule=mask_caule
+    )
+    if not larguras:
+        return 0, None
+    diametro = int(np.percentile(np.array(larguras, dtype=np.float32), DIAM_PERCENTIL))
+    linha = min(detalhes, key=lambda d: abs(d["largura"] - diametro))
+    return diametro, linha
+
+
 def medir_diametro_coleto_debug(
     mask_planta_acima: np.ndarray,
     y_topo_tubete: int,
@@ -121,17 +141,42 @@ def medir_diametro_coleto_debug(
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
         iterations=1,
     )
+    mask_dilatada = cv2.dilate(
+        mask_planta_acima,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=DILATE_ITERS,
+    )
 
     y_min = y_topo_tubete + JANELA_DEFAULT[0]
     y_max = y_topo_tubete + JANELA_DEFAULT[1]
     diametro, linha = 0, None
     if mask_caule is not None:
-        larguras, detalhes = _medir_larguras_validas(
-            stem_hint, y_min, y_max, x_base_ou_x_ref, mask_caule=mask_caule
+        candidatos = []
+        for base in (stem_hint, mask_planta_acima, mask_dilatada):
+            d_i, linha_i = _estimar_no_intervalo(
+                base,
+                y_min,
+                y_max,
+                x_base_ou_x_ref,
+                mask_caule=mask_caule,
+            )
+            if d_i > 0 and linha_i is not None:
+                candidatos.append((int(d_i), linha_i))
+        if candidatos:
+            diametro, linha = max(candidatos, key=lambda item: item[0])
+
+    if diametro <= 0:
+        diametro, linha = _estimar_no_intervalo(
+            stem_hint, y_min, y_max, x_base_ou_x_ref, mask_caule=None
         )
-        if larguras:
-            diametro = int(np.median(np.array(larguras, dtype=np.float32)))
-            linha = min(detalhes, key=lambda d: abs(d["largura"] - diametro))
+    if diametro <= 0:
+        diametro, linha = _estimar_no_intervalo(
+            mask_planta_acima, y_min, y_max, x_base_ou_x_ref, mask_caule=None
+        )
+    if diametro <= 0:
+        diametro, linha = _estimar_no_intervalo(
+            mask_dilatada, y_min, y_max, x_base_ou_x_ref, mask_caule=None
+        )
 
     if diametro <= 0:
         diametro, linha = _estimar_por_mascara(stem_hint, y_topo_tubete, x_base_ou_x_ref)

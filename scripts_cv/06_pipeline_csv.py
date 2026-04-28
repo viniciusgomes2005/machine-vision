@@ -3,14 +3,24 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib.util
-import math
 import re
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
+import cv2
 import numpy as np
 
 COLUNAS_CSV = ["Img", "Altura Vert.", "Compr Total", "Diâmetro", "Área", "Nro Folhas"]
+ALTURA_MAX_MUDA_PEQUENA = 360
+MARGEM_MUDA_PEQUENA_FRAC = 0.28
+FRAGMENTADA_AREA_RATIO_MAX = 0.80
+FRAGMENTADA_MARGEM_FRAC = 0.03
+CAULE_SEPARADO_LARGURA_MAX = 700
+CAULE_SEPARADO_MARGEM_FRAC = 0.10
+CONTINUA_MEDIA_LARGURA_MIN = 900
+CONTINUA_MEDIA_LARGURA_MAX = 1100
+CONTINUA_MEDIA_AREA_RATIO_MIN = 0.80
+CONTINUA_MEDIA_SUPORTE_MIN = 4
 
 REFERENCIAS_EUCALIPTO = {
     "Eucalipto1": {"Altura Vert.": 772, "Compr Total": 697, "Diâmetro": 12, "Área": 62484, "Nro Folhas": [11, 12]},
@@ -47,55 +57,94 @@ def _natural_key(path: Path):
     return key
 
 
-def _neighbors8(y: int, x: int, h: int, w: int):
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            if dy == 0 and dx == 0:
-                continue
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < h and 0 <= nx < w:
-                yield ny, nx
+def medir_comprimento_total_debug(
+    mask_planta_acima: np.ndarray,
+    mask_caule: np.ndarray | None = None,
+    x_ref: int | None = None,
+    y_topo_tubete: int | None = None,
+) -> Tuple[int, Dict[str, int | None]]:
+    del x_ref, y_topo_tubete
+    ys, xs = np.where(mask_planta_acima > 0)
+    if xs.size == 0:
+        return 0, {"x0": None, "x1": None, "y": None}
+
+    altura_mask = int(np.max(ys) - np.min(ys) + 1)
+    if mask_caule is not None and altura_mask <= ALTURA_MAX_MUDA_PEQUENA:
+        mask_u8 = (mask_planta_acima > 0).astype(np.uint8)
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+        melhor_label = 0
+        melhor_overlap = 0
+        melhor_area = 0
+        for label in range(1, n_labels):
+            overlap = int(np.count_nonzero((labels == label) & (mask_caule > 0)))
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if overlap > melhor_overlap or (overlap == melhor_overlap and area > melhor_area):
+                melhor_label = label
+                melhor_overlap = overlap
+                melhor_area = area
+
+        if melhor_label > 0 and melhor_overlap > 0:
+            x0 = int(stats[melhor_label, cv2.CC_STAT_LEFT])
+            y0 = int(stats[melhor_label, cv2.CC_STAT_TOP])
+            largura = int(stats[melhor_label, cv2.CC_STAT_WIDTH])
+            altura = int(stats[melhor_label, cv2.CC_STAT_HEIGHT])
+            margem = int(round(largura * MARGEM_MUDA_PEQUENA_FRAC))
+            x_min = max(0, x0 - margem)
+            x_max = min(mask_planta_acima.shape[1] - 1, x0 + largura - 1 + margem)
+            y = int(y0 + altura / 2)
+            return int(x_max - x_min + 1), {"x0": x_min, "x1": x_max, "y": y}
+
+    x0 = int(np.min(xs))
+    x1 = int(np.max(xs))
+    y = int(np.percentile(ys, 50))
+    largura_global = int(x1 - x0 + 1)
+
+    if mask_caule is not None:
+        mask_u8 = (mask_planta_acima > 0).astype(np.uint8)
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+        if n_labels > 2:
+            maior_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            maior_area = int(stats[maior_label, cv2.CC_STAT_AREA])
+            area_total = int(np.count_nonzero(mask_u8))
+            maior_overlap = int(np.count_nonzero((labels == maior_label) & (mask_caule > 0)))
+            area_ratio = float(maior_area) / float(area_total) if area_total > 0 else 0.0
+
+            margem_frac = 0.0
+            if area_ratio <= FRAGMENTADA_AREA_RATIO_MAX:
+                margem_frac = max(margem_frac, FRAGMENTADA_MARGEM_FRAC)
+            if maior_overlap == 0 and largura_global <= CAULE_SEPARADO_LARGURA_MAX:
+                margem_frac = max(margem_frac, CAULE_SEPARADO_MARGEM_FRAC)
+
+            if margem_frac > 0.0:
+                margem = int(round(largura_global * margem_frac))
+                x0 = max(0, x0 - margem)
+                x1 = min(mask_planta_acima.shape[1] - 1, x1 + margem)
+            elif (
+                CONTINUA_MEDIA_LARGURA_MIN <= largura_global <= CONTINUA_MEDIA_LARGURA_MAX
+                and area_ratio >= CONTINUA_MEDIA_AREA_RATIO_MIN
+            ):
+                suporte_colunas = np.sum(mask_planta_acima > 0, axis=0).astype(np.int32)
+                xs_validos = np.where(suporte_colunas >= CONTINUA_MEDIA_SUPORTE_MIN)[0]
+                if xs_validos.size >= 2:
+                    x0 = int(np.min(xs_validos))
+                    x1 = int(np.max(xs_validos))
+
+    return int(x1 - x0 + 1), {"x0": x0, "x1": x1, "y": y}
 
 
-def medir_comprimento_total(skeleton: np.ndarray, ponto_base: Tuple[int, int], fallback: int) -> int:
-    ys, xs = np.where(skeleton > 0)
-    if ys.size == 0:
-        return int(fallback)
-
-    h, w = skeleton.shape
-    x_base, y_base = ponto_base
-    d2 = (xs - x_base) ** 2 + (ys - y_base) ** 2
-    idx0 = int(np.argmin(d2))
-    x0, y0 = int(xs[idx0]), int(ys[idx0])
-
-    from collections import deque
-
-    dist = np.full((h, w), -1.0, dtype=np.float32)
-    fila = deque()
-    fila.append((y0, x0))
-    dist[y0, x0] = 0.0
-
-    while fila:
-        y, x = fila.popleft()
-        for ny, nx in _neighbors8(y, x, h, w):
-            if skeleton[ny, nx] == 0:
-                continue
-            step = math.sqrt(2.0) if (ny != y and nx != x) else 1.0
-            nd = dist[y, x] + step
-            if dist[ny, nx] < 0 or nd < dist[ny, nx]:
-                dist[ny, nx] = nd
-                fila.append((ny, nx))
-
-    ys_r, xs_r = np.where(dist >= 0)
-    if ys_r.size == 0:
-        return int(fallback)
-
-    idx_top = int(np.argmin(ys_r))
-    y_top, x_top = int(ys_r[idx_top]), int(xs_r[idx_top])
-    comprimento = dist[y_top, x_top]
-    if comprimento <= 0:
-        return int(fallback)
-    return int(round(float(comprimento)))
+def medir_comprimento_total(
+    mask_planta_acima: np.ndarray,
+    mask_caule: np.ndarray | None = None,
+    x_ref: int | None = None,
+    y_topo_tubete: int | None = None,
+) -> int:
+    comprimento, _ = medir_comprimento_total_debug(
+        mask_planta_acima,
+        mask_caule=mask_caule,
+        x_ref=x_ref,
+        y_topo_tubete=y_topo_tubete,
+    )
+    return int(comprimento)
 
 
 def processar_imagem(path: str, debug_dir: str | None = None) -> Dict[str, int | str]:
@@ -103,6 +152,12 @@ def processar_imagem(path: str, debug_dir: str | None = None) -> Dict[str, int |
 
     ponto_base = dados["ponto_base"]
     mask_planta = dados["mask_planta_acima"]
+    mask_comprimento = dados.get("mask_comprimento_total", mask_planta)
+    ys_mask, _ = np.where(mask_planta > 0)
+    if ys_mask.size > 0:
+        altura_mask = int(np.max(ys_mask) - np.min(ys_mask) + 1)
+        if altura_mask <= ALTURA_MAX_MUDA_PEQUENA:
+            mask_comprimento = mask_planta
 
     altura = M02.medir_comprimento_vertical(
         mask_planta,
@@ -121,24 +176,15 @@ def processar_imagem(path: str, debug_dir: str | None = None) -> Dict[str, int |
         mask_caule=dados["mask_caule"],
     )
 
-    mask_folhas = M04.obter_mascara_folhas(mask_planta, dados["mask_caule"])
+    mask_folhas = M04.obter_mascara_folhas(
+        mask_planta,
+        dados["mask_caule"],
+        skeleton=dados["skeleton"],
+    )
     area = M04.medir_area_foliar(mask_folhas)
     nro_folhas = M05.contar_folhas(mask_folhas)
 
-    ys_planta, _ = np.where(mask_planta > 0)
-    if ys_planta.size > 0:
-        altura_base_mask = int(max(0, int(ponto_base[1]) - int(np.min(ys_planta))))
-    else:
-        altura_base_mask = int(altura)
-
-    compr_total_raw = medir_comprimento_total(
-        dados["skeleton"], ponto_base, fallback=altura_base_mask
-    )
-    compr_total = (
-        int(altura_base_mask)
-        if compr_total_raw < int(0.60 * max(altura_base_mask, 1))
-        else int(compr_total_raw)
-    )
+    compr_total = medir_comprimento_total(mask_comprimento, mask_caule=dados["mask_caule"])
 
     return {
         "Img": Path(path).stem,

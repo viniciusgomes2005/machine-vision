@@ -33,6 +33,17 @@ OFFSET_Y_BORDA_TRASEIRA = 2
 PERSISTENCIA_BORDA_TRASEIRA = 4
 OFFSET_Y_MEDIA_CONFIANCA = 6
 OFFSET_Y_BAIXA_CONFIANCA = 2
+BASE_SEED_BAND = 120
+RESIDUO_BASE_BANDA_ALTURA = 76
+RESIDUO_BASE_COMP_MAX_H = 14
+RESIDUO_BASE_RATIO_MIN = 4.0
+RESIDUO_BASE_MAIN_LARGURA_MIN = 24
+RESIDUO_BASE_MAIN_KEEP_HALF = 8
+RESIDUO_BASE_PODA_FAIXA_FINAL = 44
+COMPRIMENTO_BASE_BAND = 8
+COMPRIMENTO_BASE_AREA_MIN = 15
+COMPRIMENTO_BASE_WIDTH_MIN = 18
+COMPRIMENTO_BASE_HEIGHT_MAX = 12
 
 
 def _odd(v: int) -> int:
@@ -537,7 +548,6 @@ def separar_planta_acima_vaso(
     mask_planta = sem_tubete.copy()
     y_limite_planta = max(0, y_topo_tubete - MARGEM_SEGURA_VASO)
     mask_planta[y_limite_planta:, :] = 0
-
     # Seleciona componentes primeiro; dilatacao aqui pode colar caule com tampa do vaso.
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_planta, connectivity=8)
 
@@ -571,6 +581,90 @@ def separar_planta_acima_vaso(
     return saida
 
 
+def _extrair_muda_sem_vaso(mask_planta: np.ndarray, y_limite_planta: int, x_centro_tubete: int) -> np.ndarray:
+    h, w = mask_planta.shape
+    # Fechamento leve para manter continuidade de caule sem engrossar bordas do vaso.
+    bridge = cv2.morphologyEx(mask_planta, cv2.MORPH_CLOSE, _kernel((3, 5)))
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bridge, connectivity=8)
+    if n_labels <= 1:
+        return mask_planta.copy()
+
+    y_seed0 = max(0, int(y_limite_planta) - BASE_SEED_BAND)
+    y_seed1 = max(0, int(y_limite_planta) - 1)
+    x_band = int(max(55, 0.11 * w))
+    x0 = max(0, int(x_centro_tubete) - x_band)
+    x1 = min(w - 1, int(x_centro_tubete) + x_band)
+
+    melhor_label = 0
+    melhor_score = -1e12
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < AREA_MIN_OBJ:
+            continue
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        bw = int(stats[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats[label, cv2.CC_STAT_HEIGHT])
+        yb = y + bh - 1
+        xc = x + bw // 2
+        comp = labels == label
+
+        seed_overlap = False
+        if y_seed1 >= y_seed0:
+            roi = comp[y_seed0 : y_seed1 + 1, x0 : x1 + 1]
+            seed_overlap = bool(np.any(roi))
+
+        verticalidade = float(bh) / max(1.0, float(bw))
+        score = float(area) + 1.8 * float(yb) + 140.0 * verticalidade - 1.2 * abs(float(xc - x_centro_tubete))
+        if seed_overlap:
+            score += 2600.0
+        if score > melhor_score:
+            melhor_score = score
+            melhor_label = label
+
+    if melhor_label == 0:
+        return mask_planta.copy()
+
+    principal_bridge = np.zeros_like(mask_planta)
+    principal_bridge[labels == melhor_label] = 255
+
+    # Recupera folhas finas conectadas ao corpo principal por pequenas lacunas.
+    suporte = cv2.dilate(principal_bridge, _kernel((17, 17)), iterations=1)
+    xpb, ypb, wpb, hpb = _bbox_from_mask(principal_bridge)
+    px0 = max(0, int(xpb) - 130)
+    px1 = min(w - 1, int(xpb + wpb - 1) + 130)
+    py0 = max(0, int(ypb) - 240)
+    py1 = min(h - 1, int(y_limite_planta) - 10)
+    n0, labels0, stats0, _ = cv2.connectedComponentsWithStats(mask_planta, connectivity=8)
+    out = np.zeros_like(mask_planta)
+    for label in range(1, n0):
+        area = int(stats0[label, cv2.CC_STAT_AREA])
+        if area < 18:
+            continue
+        x = int(stats0[label, cv2.CC_STAT_LEFT])
+        y = int(stats0[label, cv2.CC_STAT_TOP])
+        bw = int(stats0[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats0[label, cv2.CC_STAT_HEIGHT])
+        yb = y + bh - 1
+        comp = labels0 == label
+        toca_suporte = np.any(comp & (suporte > 0))
+        dentro_bbox_expandido = (
+            (x + bw - 1) >= px0
+            and x <= px1
+            and yb >= py0
+            and y <= py1
+        )
+        if toca_suporte or (dentro_bbox_expandido and area >= 60):
+            out[comp] = 255
+
+    if np.count_nonzero(out) == 0:
+        out = principal_bridge
+
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, _kernel((3, 3)))
+    return out
+
+
 def _segmentos_horizontais(row: np.ndarray):
     xs = np.where(row > 0)[0]
     if xs.size == 0:
@@ -595,6 +689,22 @@ def _segmento_contendo_x(row: np.ndarray, x_ref: int):
         if x0 <= x_ref <= x1:
             return x0, x1
     return None
+
+
+def _segmento_mais_proximo_x(row: np.ndarray, x_ref: int) -> Optional[Tuple[int, int]]:
+    segs = _segmentos_horizontais(row)
+    if not segs:
+        return None
+    melhor = None
+    best_dist = 10**9
+    for x0, x1 in segs:
+        if x0 <= x_ref <= x1:
+            return x0, x1
+        dist = min(abs(x_ref - x0), abs(x_ref - x1))
+        if dist < best_dist:
+            best_dist = dist
+            melhor = (x0, x1)
+    return melhor
 
 
 def _podar_tampa_vaso(mask: np.ndarray, y_topo_tubete: int, x_centro_tubete: int) -> np.ndarray:
@@ -628,6 +738,308 @@ def _podar_tampa_vaso(mask: np.ndarray, y_topo_tubete: int, x_centro_tubete: int
             keep1 = min(w - 1, x_stem + BASE_HALF_WIDTH_KEEP)
             out[y, :keep0] = 0
             out[y, keep1 + 1 :] = 0
+    return out
+
+
+def _labels_componentes_visual(mask: np.ndarray) -> np.ndarray:
+    n_labels, labels, _, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    vis = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+    if n_labels <= 1:
+        return vis
+    for label in range(1, n_labels):
+        hue = int((37 * label) % 180)
+        comp = (labels == label).astype(np.uint8) * 255
+        hsv = np.zeros_like(vis)
+        hsv[:, :, 0] = hue
+        hsv[:, :, 1] = 220
+        hsv[:, :, 2] = comp
+        cor = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        vis[comp > 0] = cor[comp > 0]
+    return vis
+
+
+def _limpar_residuo_base_geometrico(
+    mask: np.ndarray,
+    y_limite_planta: int,
+    x_centro_tubete: int,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    h, w = mask.shape
+    y_base = int(max(0, min(h - 1, y_limite_planta - 1)))
+    y_inf = max(0, y_base - RESIDUO_BASE_BANDA_ALTURA)
+
+    mask_morf = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _kernel((3, 3)))
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_morf, connectivity=8)
+
+    if n_labels <= 1:
+        debug = {
+            "mask_sem_vaso_inicial": mask.copy(),
+            "mask_sem_vaso_pos_morfologia": mask_morf,
+            "mask_sem_vaso_componentes": _labels_componentes_visual(mask_morf),
+            "mask_residuo_base_removido": np.zeros_like(mask_morf),
+            "mask_sem_vaso_final_geometrico": mask_morf.copy(),
+        }
+        return mask_morf, debug
+
+    # Componente principal: maior suporte vertical + area + proximidade ao centro do vaso.
+    label_main = 0
+    best_score = -1e12
+    for label in range(1, n_labels):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        bw = int(stats[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        yb = y + bh - 1
+        xc = x + bw // 2
+        verticalidade = float(bh) / max(float(bw), 1.0)
+        score = float(area) + 2.0 * float(yb) + 180.0 * verticalidade - 0.25 * abs(float(xc - x_centro_tubete))
+        if score > best_score:
+            best_score = score
+            label_main = label
+
+    out = mask_morf.copy()
+    removido = np.zeros_like(mask_morf)
+
+    # Ajuste adaptativo para mudas pequenas: tolera componentes menores e poda base mais estreita.
+    y_top_main = int(stats[label_main, cv2.CC_STAT_TOP])
+    altura_main = int(stats[label_main, cv2.CC_STAT_HEIGHT])
+    caso_pequeno = altura_main <= 360
+    ratio_min = 3.8 if caso_pequeno else RESIDUO_BASE_RATIO_MIN
+    h_max = 12 if caso_pequeno else RESIDUO_BASE_COMP_MAX_H
+    keep_half = 6 if caso_pequeno else RESIDUO_BASE_MAIN_KEEP_HALF
+
+    # Remove componentes horizontais residuais na base.
+    n_residuos = 0
+    for label in range(1, n_labels):
+        if label == label_main:
+            continue
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        bw = int(stats[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats[label, cv2.CC_STAT_HEIGHT])
+        yb = y + bh - 1
+        ratio = float(bw) / max(float(bh), 1.0)
+        if yb < y_inf:
+            continue
+        if bw < 30:
+            continue
+        if bh > h_max:
+            continue
+        if ratio < ratio_min:
+            continue
+        comp = labels == label
+        out[comp] = 0
+        removido[comp] = 255
+        n_residuos += 1
+
+    # Poda no componente principal apenas quando ha evidencia forte de residuo.
+    if not (caso_pequeno or n_residuos > 0):
+        # Padrão especial: barra horizontal residual persistente na base + cauda fina no fundo.
+        x_seed = int(x_centro_tubete)
+        ys_b, xs_b = np.where(out[max(0, y_base - 24) : y_base + 1, :] > 0)
+        if xs_b.size > 0:
+            x_seed = int(np.median(xs_b))
+
+        w_hist = []
+        y0 = max(0, y_base - 14)
+        y1 = max(0, y_base - 2)
+        for y in range(y0, y1 + 1):
+            seg = _segmento_mais_proximo_x(out[y, :], x_seed)
+            if seg is None:
+                continue
+            x0, x1 = seg
+            w_hist.append(int(x1 - x0 + 1))
+
+        tail_bottom = _segmento_mais_proximo_x(out[y_base, :], x_seed)
+        tem_cauda_fina = False
+        if tail_bottom is not None:
+            bx0, bx1 = tail_bottom
+            tem_cauda_fina = int(bx1 - bx0 + 1) <= 4
+
+        hits_barra = sum(1 for ww in w_hist if 28 <= ww <= 46)
+        if tem_cauda_fina and hits_barra >= 5:
+            keep0 = max(0, int(x_seed) - 6)
+            keep1 = min(w - 1, int(x_seed) + 6)
+            for y in range(y0, y1 + 1):
+                seg = _segmento_mais_proximo_x(out[y, :], x_seed)
+                if seg is None:
+                    continue
+                x0, x1 = seg
+                if x0 < keep0:
+                    out[y, x0:keep0] = 0
+                    removido[y, x0:keep0] = 255
+                if x1 > keep1:
+                    out[y, keep1 + 1 : x1 + 1] = 0
+                    removido[y, keep1 + 1 : x1 + 1] = 255
+        else:
+            debug = {
+                "mask_sem_vaso_inicial": mask.copy(),
+                "mask_sem_vaso_pos_morfologia": mask_morf,
+                "mask_sem_vaso_componentes": _labels_componentes_visual(mask_morf),
+                "mask_residuo_base_removido": removido,
+                "mask_sem_vaso_final_geometrico": out,
+            }
+            return out, debug
+
+    # Poda horizontal residual conectada ao componente principal apenas na faixa inferior.
+    main_mask = (labels == label_main).astype(np.uint8) * 255
+    x_stem = int(x_centro_tubete)
+    ys_low, xs_low = np.where((main_mask > 0) & (np.arange(h)[:, None] >= y_inf))
+    if xs_low.size > 0:
+        x_stem = int(np.median(xs_low))
+
+    # Refina centro do caule por suporte vertical real na base.
+    x_cands = []
+    for y in range(y_inf, y_base + 1):
+        seg = _segmento_mais_proximo_x(out[y, :], x_stem)
+        if seg is None:
+            continue
+        x0, x1 = seg
+        xc = int((x0 + x1) / 2)
+        if tem_suporte_vertical(out, xc, y, altura=36, meia_largura=2, min_pixels=12):
+            x_cands.append(xc)
+    if x_cands:
+        x_stem = int(np.median(np.asarray(x_cands, dtype=np.int32)))
+
+    y_poda0 = max(0, y_base - RESIDUO_BASE_PODA_FAIXA_FINAL)
+    for y in range(y_poda0, y_base + 1):
+        seg = _segmento_mais_proximo_x(out[y, :], x_stem)
+        if seg is None:
+            continue
+        x0, x1 = seg
+        largura = int(x1 - x0 + 1)
+        if largura < max(RESIDUO_BASE_MAIN_LARGURA_MIN, 2 * keep_half + 6):
+            continue
+        keep0 = max(0, x_stem - keep_half)
+        keep1 = min(w - 1, x_stem + keep_half)
+        if x0 < keep0:
+            out[y, x0:keep0] = 0
+            removido[y, x0:keep0] = 255
+        if x1 > keep1:
+            out[y, keep1 + 1 : x1 + 1] = 0
+            removido[y, keep1 + 1 : x1 + 1] = 255
+
+    # Passo final especifico para barra horizontal residual da borda do vaso.
+    x_seed2 = int(x_stem)
+    base_band = out[max(0, y_base - 24) : y_base + 1, :]
+    ys2, xs2 = np.where(base_band > 0)
+    if xs2.size > 0:
+        x_seed2 = int(np.median(xs2))
+    y_last = int(y_base)
+    if ys2.size > 0:
+        y_last = int(max(0, y_base - 24 + int(np.max(ys2))))
+    y0f = max(0, y_last - 14)
+    y1f = max(0, y_last - 2)
+    w_hist2 = []
+    for y in range(y0f, y1f + 1):
+        seg = _segmento_mais_proximo_x(out[y, :], x_seed2)
+        if seg is None:
+            continue
+        x0, x1 = seg
+        w_hist2.append(int(x1 - x0 + 1))
+    tail2 = _segmento_mais_proximo_x(out[y_last, :], x_seed2)
+    tail_ok2 = False
+    if tail2 is not None:
+        tx0, tx1 = tail2
+        tail_ok2 = int(tx1 - tx0 + 1) <= 4
+    if tail_ok2 and sum(1 for ww in w_hist2 if 28 <= ww <= 46) >= 5:
+        keep0 = max(0, int(x_seed2) - 6)
+        keep1 = min(w - 1, int(x_seed2) + 6)
+        for y in range(y0f, y1f + 1):
+            seg = _segmento_mais_proximo_x(out[y, :], x_seed2)
+            if seg is None:
+                continue
+            x0, x1 = seg
+            if x0 < keep0:
+                out[y, x0:keep0] = 0
+                removido[y, x0:keep0] = 255
+            if x1 > keep1:
+                out[y, keep1 + 1 : x1 + 1] = 0
+                removido[y, keep1 + 1 : x1 + 1] = 255
+
+    debug = {
+        "mask_sem_vaso_inicial": mask.copy(),
+        "mask_sem_vaso_pos_morfologia": mask_morf,
+        "mask_sem_vaso_componentes": _labels_componentes_visual(mask_morf),
+        "mask_residuo_base_removido": removido,
+        "mask_sem_vaso_final_geometrico": out,
+    }
+    return out, debug
+
+
+def _remover_barra_horizontal_rodape(mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    out = mask.copy()
+    removido = np.zeros_like(mask)
+    ys, _ = np.where(out > 0)
+    if ys.size == 0:
+        return out, removido
+
+    y_last = int(np.max(ys))
+    row_last = out[y_last, :]
+    segs_last = _segmentos_horizontais(row_last)
+    if not segs_last:
+        return out, removido
+    w_last = max(int(x1 - x0 + 1) for x0, x1 in segs_last)
+    if w_last > 4:
+        return out, removido
+
+    cands = []
+    for y in range(max(0, y_last - 16), max(0, y_last - 1)):
+        segs = _segmentos_horizontais(out[y, :])
+        if not segs:
+            continue
+        seg = max(segs, key=lambda s: (s[1] - s[0] + 1))
+        x0, x1 = seg
+        ww = int(x1 - x0 + 1)
+        if 28 <= ww <= 46:
+            cands.append((y, x0, x1, ww, int((x0 + x1) / 2)))
+
+    if len(cands) < 5:
+        return out, removido
+
+    x_center = int(np.median(np.asarray([c[4] for c in cands], dtype=np.int32)))
+    keep0 = max(0, x_center - 6)
+    keep1 = min(out.shape[1] - 1, x_center + 6)
+
+    for y, x0, x1, _ww, _xc in cands:
+        if x0 < keep0:
+            out[y, x0:keep0] = 0
+            removido[y, x0:keep0] = 255
+        if x1 > keep1:
+            out[y, keep1 + 1 : x1 + 1] = 0
+            removido[y, keep1 + 1 : x1 + 1] = 255
+
+    return out, removido
+
+
+def _recuperar_extremos_para_comprimento(
+    mask_planta_final: np.ndarray,
+    mask_objetos: np.ndarray,
+    mask_tubete: np.ndarray,
+    y_topo_tubete: int,
+) -> np.ndarray:
+    sem_tubete = cv2.bitwise_and(mask_objetos, cv2.bitwise_not(mask_tubete))
+    candidato = sem_tubete.copy()
+    candidato[int(y_topo_tubete) :, :] = 0
+    faltante = cv2.bitwise_and(candidato, cv2.bitwise_not(mask_planta_final))
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(faltante, connectivity=8)
+    out = mask_planta_final.copy()
+    y_min_base = int(y_topo_tubete) - COMPRIMENTO_BASE_BAND
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < COMPRIMENTO_BASE_AREA_MIN:
+            continue
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        bw = int(stats[label, cv2.CC_STAT_WIDTH])
+        bh = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if y < y_min_base:
+            continue
+        if bw < COMPRIMENTO_BASE_WIDTH_MIN:
+            continue
+        if bh > COMPRIMENTO_BASE_HEIGHT_MAX:
+            continue
+        out[labels == label] = 255
     return out
 
 
@@ -955,6 +1367,20 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
 
     y_limite_planta = max(0, y_topo_tubete - MARGEM_SEGURA_VASO)
     mask_planta_acima[y_limite_planta:, :] = 0
+    mask_planta_acima, debug_residuo = _limpar_residuo_base_geometrico(
+        mask_planta_acima,
+        y_limite_planta=int(y_limite_planta),
+        x_centro_tubete=int(x_centro_tubete),
+    )
+    mask_planta_acima, mask_barra_rodape_removida = _remover_barra_horizontal_rodape(mask_planta_acima)
+    debug_residuo["mask_barra_horizontal_rodape_removida"] = mask_barra_rodape_removida
+    mask_planta_acima[y_limite_planta:, :] = 0
+    mask_comprimento_total = _recuperar_extremos_para_comprimento(
+        mask_planta_final=mask_planta_acima,
+        mask_objetos=mask_objetos,
+        mask_tubete=mask_tubete,
+        y_topo_tubete=int(y_topo_tubete),
+    )
     ponto_base = achar_base_coleto(
         mask_planta_acima,
         y_topo_tubete,
@@ -976,6 +1402,7 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
             "mask_planta_acima": mask_planta_acima,
             "mask_planta_antes_remover_boca_vaso": mask_planta_antes_remover_boca,
             "mask_planta_sem_boca_vaso": mask_planta_acima,
+            "mask_comprimento_total": mask_comprimento_total,
             "skeleton": skeleton,
             "mask_caule": mask_caule,
         }
@@ -986,6 +1413,8 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
                 debug_masks["mask_corpo_vaso_raw"] = debug_tubete["mask_corpo_vaso_raw"]
             if "mask_corpo_vaso" in debug_tubete:
                 debug_masks["mask_corpo_vaso"] = debug_tubete["mask_corpo_vaso"]
+        debug_masks.update(debug_residuo)
+        debug_masks["mask_boca_removida"] = mask_boca_removida
         debug_masks["mask_planta_acima_sem_vaso"] = mask_planta_acima
         _salvar_debug_masks(
             Path(debug_dir),
@@ -1027,6 +1456,7 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
         "mask_boca_removida": mask_boca_removida,
         "ponto_base": ponto_base,
         "mask_planta_acima": mask_planta_acima,
+        "mask_comprimento_total": mask_comprimento_total,
         "skeleton": skeleton,
         "mask_caule": mask_caule,
     }

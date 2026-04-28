@@ -14,6 +14,14 @@ SEED_HALF_H = 4
 AREA_MIN_CONNECTED = 35
 MAX_CANDIDATOS = 80
 BASE_TRACK_HALF_W = 4
+BASE_RESIDUO_GAP_MAX = 8
+BASE_RESIDUO_W_MAX = 2
+BASE_RESIDUO_TOPO_DELTA_MIN = 90
+BASE_RESIDUO_TOPO_DELTA_MAX = 260
+BASE_RESIDUO_SUBIR_FRAC = 0.042
+BASE_RESIDUO_SUBIR_MIN = 18
+BASE_RESIDUO_SUBIR_MAX = 42
+STEM_INVISIBLE_GAP = 10
 HSV_BLUE_LOW = np.array([75, 40, 40], dtype=np.uint8)
 HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)
 TOP_RAW_HALF_W = 90
@@ -104,6 +112,17 @@ def _obter_topo_conectado(
     return int(ys.min())
 
 
+def _tem_suporte_vertical(mask: np.ndarray, x: int, y: int, altura: int = 34, meia_largura: int = 2, min_pixels: int = 10) -> bool:
+    h, w = mask.shape
+    y0 = max(0, int(y) - int(altura))
+    y1 = max(0, int(y) - 1)
+    if y1 < y0:
+        return False
+    x0 = max(0, int(x) - int(meia_largura))
+    x1 = min(w - 1, int(x) + int(meia_largura))
+    return int(np.count_nonzero(mask[y0 : y1 + 1, x0 : x1 + 1])) >= int(min_pixels)
+
+
 def _topo_raw_local(
     img_bgr: np.ndarray,
     x_base: int,
@@ -163,6 +182,7 @@ def obter_pontos_altura_vertical(
 
     h, _ = mask_planta_local.shape
     y_base_lim = max(0, min(h - 1, int(y_topo_tubete) - MARGEM_SEGURA_VASO))
+    altura_total = int(max(1, y_base_lim - y_top_global))
 
     if mask_objetos is not None:
         mask_source = mask_objetos.copy()
@@ -189,21 +209,18 @@ def obter_pontos_altura_vertical(
         y_top_conn = _obter_topo_conectado(mask_source, x_base, y_base)
         if y_top_conn is None:
             continue
-
         span = float(y_base - y_top_conn)
         dist_pref = abs(int(x_base) - x_pref)
-
-        # Maximize span (caule principal), penalizando levemente largura e distancia.
         score = span - 0.06 * float(dist_pref) - 0.20 * float(largura)
         if score > melhor_score:
             melhor_score = score
-            melhor = (int(x_base), int(y_base), int(y_top_conn))
+            melhor = (int(x_base), int(y_base), int(y_top_conn), int(largura), int(span), int(dist_pref))
 
     if melhor is None:
         x_ref = int(x_centro_tubete if x_centro_tubete is not None else ponto_base[0])
         return x_ref, y_base_lim, y_top_global
 
-    x_base, y_base, y_top_conn = melhor
+    x_base, y_base, y_top_conn, largura_base, _span, _dist_pref = melhor
     # Refina base: desce seguindo o mesmo eixo x do caule para pegar
     # o primeiro ponto real do caule, mesmo com fusao local da mascara.
     y_max_track = min(h - 1, int(y_base_lim))
@@ -214,6 +231,19 @@ def obter_pontos_altura_vertical(
             y_base = int(y)
         else:
             break
+
+    # Residuo na base: quando a base fica colada ao topo do vaso com segmento fino,
+    # corrige para a emergencia da muda alguns pixels acima.
+    gap_vaso = int(y_base_lim) - int(y_base)
+    topo_delta = int(y_top_conn) - int(y_top_global)
+    if (
+        gap_vaso <= BASE_RESIDUO_GAP_MAX
+        and int(largura_base) <= BASE_RESIDUO_W_MAX
+        and topo_delta >= BASE_RESIDUO_TOPO_DELTA_MIN
+        and topo_delta <= BASE_RESIDUO_TOPO_DELTA_MAX
+    ):
+        subir = int(max(BASE_RESIDUO_SUBIR_MIN, min(BASE_RESIDUO_SUBIR_MAX, BASE_RESIDUO_SUBIR_FRAC * altura_total)))
+        y_base = max(0, int(y_base) - subir)
 
     y_base = min(int(y_base), y_base_lim)
     y_topo = min(int(y_top_global), int(y_top_conn))
