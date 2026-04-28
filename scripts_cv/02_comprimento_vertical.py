@@ -40,6 +40,17 @@ TOP_RAW_HALF_W = 90  # janela lateral para recuperar topo no objeto bruto
 TOP_RAW_AREA_MIN = 12  # menor componente aceito nessa recuperacao do topo
 
 
+def _muda_compacta_com_tubete_alto(mask: np.ndarray, y_topo_tubete: int) -> bool:
+    h, _ = mask.shape
+    if h <= 0:
+        return False
+    ys, _ = np.where(mask > 0)
+    if ys.size == 0:
+        return False
+    altura = int(np.max(ys) - np.min(ys) + 1)
+    return int(y_topo_tubete) < int(0.58 * h) and altura <= 420
+
+
 def _segmentos_horizontais(row_bool: np.ndarray):
     xs = np.where(row_bool)[0]
     if xs.size == 0:
@@ -243,6 +254,9 @@ def obter_pontos_altura_vertical(
             y_base = int(y)
         else:
             break
+
+    if _muda_compacta_com_tubete_alto(mask_planta_local, int(y_topo_tubete)):
+        y_base = int(y_base_lim)
 
     # Residuo na base: quando a base fica colada ao topo do vaso com segmento fino,
     # corrige para a emergencia da muda alguns pixels acima.

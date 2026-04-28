@@ -72,6 +72,17 @@ CAULE_DESVIO_LATERAL_MAX_FRAC = 0.78  # desvio lateral relativo maximo permitido
 CAULE_DESVIO_LATERAL_MAX_ABS = 920  # limite absoluto de desvio lateral
 
 
+def _muda_compacta_com_tubete_alto(mask: np.ndarray, y_referencia_vaso: int) -> bool:
+    h, _ = mask.shape
+    if h <= 0:
+        return False
+    ys, _ = np.where(mask > 0)
+    if ys.size == 0:
+        return False
+    altura = int(np.max(ys) - np.min(ys) + 1)
+    return int(y_referencia_vaso) < int(0.58 * h) and altura <= 420
+
+
 def _odd(v: int) -> int:
     return v if v % 2 == 1 else v + 1
 
@@ -888,6 +899,15 @@ def _limpar_residuo_base_geometrico(
     y_top_main = int(stats[label_main, cv2.CC_STAT_TOP])
     altura_main = int(stats[label_main, cv2.CC_STAT_HEIGHT])
     caso_pequeno = altura_main <= 360
+    if _muda_compacta_com_tubete_alto(mask, y_limite_planta):
+        debug = {
+            "mask_sem_vaso_inicial": mask.copy(),
+            "mask_sem_vaso_pos_morfologia": mask_morf,
+            "mask_sem_vaso_componentes": _labels_componentes_visual(mask_morf),
+            "mask_residuo_base_removido": removido,
+            "mask_sem_vaso_final_geometrico": out,
+        }
+        return out, debug
     ratio_min = 3.8 if caso_pequeno else RESIDUO_BASE_RATIO_MIN
     h_max = 12 if caso_pequeno else RESIDUO_BASE_COMP_MAX_H
     keep_half = 6 if caso_pequeno else RESIDUO_BASE_MAIN_KEEP_HALF
@@ -1139,6 +1159,9 @@ def remover_boca_vaso(
     y1 = min(h - 1, int(y_topo_tubete) + BOCA_PIX_ABAIXO)
     x0 = max(0, int(x_centro_tubete) - BOCA_MEIA_LARGURA)
     x1 = min(w - 1, int(x_centro_tubete) + BOCA_MEIA_LARGURA)
+
+    if _muda_compacta_com_tubete_alto(mask_planta_acima, int(y_topo_tubete)):
+        return mask_planta_acima.copy(), np.zeros_like(mask_planta_acima), img_bgr.copy()
 
     region = np.zeros_like(mask_planta_acima)
     region[y0 : y1 + 1, x0 : x1 + 1] = 255
