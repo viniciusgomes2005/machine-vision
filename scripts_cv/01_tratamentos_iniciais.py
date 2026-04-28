@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -44,6 +44,14 @@ COMPRIMENTO_BASE_BAND = 8
 COMPRIMENTO_BASE_AREA_MIN = 15
 COMPRIMENTO_BASE_WIDTH_MIN = 18
 COMPRIMENTO_BASE_HEIGHT_MAX = 12
+CAULE_BANDA_PX = 10
+CAULE_BEAM_WIDTH = 40
+CAULE_CLUSTER_GAP_PX = 16
+CAULE_LARGURA_MAX_FRAC = 0.28
+CAULE_MIN_PONTOS_EIXO = 4
+CAULE_SUAVIZACAO_FRAC = 0.012
+CAULE_DESVIO_LATERAL_MAX_FRAC = 0.78
+CAULE_DESVIO_LATERAL_MAX_ABS = 920
 
 
 def _odd(v: int) -> int:
@@ -1236,13 +1244,237 @@ def _ajustar_para_skeleton(skel: np.ndarray, ponto_base: Tuple[int, int]) -> Opt
     return int(xs[idx]), int(ys[idx])
 
 
-def estimar_eixo_caule(mask_planta_acima: np.ndarray, ponto_base: Tuple[int, int]) -> np.ndarray:
+def _mapa_custo_cor_caule(img_bgr: Optional[np.ndarray], mask_planta_acima: np.ndarray) -> np.ndarray:
+    if img_bgr is None:
+        return np.full(mask_planta_acima.shape, 20.0, dtype=np.float32)
+
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0].astype(np.int16)
+    s = hsv[:, :, 1].astype(np.int16)
+    v = hsv[:, :, 2].astype(np.int16)
+
+    verde_folha = (h >= 30) & (h <= 95) & (s >= 35) & (v >= 35)
+    vermelho_caule = ((h <= 18) | (h >= 165)) & (s >= 35) & (v >= 35)
+    marrom_escuro = (h <= 35) & (s >= 25) & (v <= 175)
+    pouco_verde_escuro = (s <= 95) & (v <= 135)
+    pista_caule = vermelho_caule | marrom_escuro | pouco_verde_escuro
+
+    custo = np.full(mask_planta_acima.shape, 24.0, dtype=np.float32)
+    custo[verde_folha] += 65.0
+    custo[pista_caule] -= 32.0
+    custo[mask_planta_acima == 0] = 1e4
+    custo = cv2.GaussianBlur(custo, (7, 7), 0)
+    return custo.astype(np.float32)
+
+
+def _agrupar_xs_caule(xs: np.ndarray, gap: int) -> List[np.ndarray]:
+    if xs.size == 0:
+        return []
+    xs_ord = np.sort(xs.astype(np.int32))
+    grupos: List[List[int]] = [[int(xs_ord[0])]]
+    for x in xs_ord[1:]:
+        if int(x) - grupos[-1][-1] > gap:
+            grupos.append([])
+        grupos[-1].append(int(x))
+    return [np.array(g, dtype=np.int32) for g in grupos if g]
+
+
+def _mask_linha_eixo(shape: Tuple[int, int], pontos_yx: List[Tuple[int, int]], espessura: int = 1) -> np.ndarray:
+    mask = np.zeros(shape, dtype=np.uint8)
+    if not pontos_yx:
+        return mask
+    if len(pontos_yx) == 1:
+        y, x = pontos_yx[0]
+        mask[int(y), int(x)] = 255
+        return mask
+    for (y0, x0), (y1, x1) in zip(pontos_yx, pontos_yx[1:]):
+        cv2.line(mask, (int(x0), int(y0)), (int(x1), int(y1)), 255, int(espessura), lineType=cv2.LINE_AA)
+    return (mask > 0).astype(np.uint8) * 255
+
+
+def _suavizar_eixo_caule(pontos_yx: List[Tuple[float, float]], altura: int) -> List[Tuple[int, int]]:
+    if len(pontos_yx) <= 2:
+        return [(int(round(y)), int(round(x))) for y, x in pontos_yx]
+
+    ys = np.array([p[0] for p in pontos_yx], dtype=np.float64)
+    xs = np.array([p[1] for p in pontos_yx], dtype=np.float64)
+    grau = 2 if len(pontos_yx) < 7 else 3
+    try:
+        poly = np.poly1d(np.polyfit(ys, xs, grau))
+        xs_fit = poly(ys)
+    except np.linalg.LinAlgError:
+        xs_fit = xs
+
+    max_desvio = max(12.0, 0.04 * float(max(1, altura)))
+    xs_suave = np.clip(xs_fit, xs - max_desvio, xs + max_desvio)
+    caminho = [(int(round(float(y))), int(round(float(x)))) for y, x in zip(ys, xs_suave)]
+
+    epsilon = max(4.0, min(16.0, CAULE_SUAVIZACAO_FRAC * float(max(1, altura))))
+    pts = np.array([[x, y] for y, x in caminho], dtype=np.float32).reshape((-1, 1, 2))
+    approx = cv2.approxPolyDP(pts, epsilon, False).reshape((-1, 2))
+    if len(approx) >= 2:
+        caminho = [(int(round(float(y))), int(round(float(x)))) for x, y in approx]
+    return caminho
+
+
+def _estimar_eixo_caule_por_pista(
+    mask_planta_acima: np.ndarray,
+    ponto_base: Tuple[int, int],
+    skel: np.ndarray,
+    img_bgr: Optional[np.ndarray],
+) -> Optional[np.ndarray]:
+    ys_all, xs_all = np.where(mask_planta_acima > 0)
+    if ys_all.size == 0:
+        return None
+
+    h, w = mask_planta_acima.shape
+    x_base, y_base = int(ponto_base[0]), int(ponto_base[1])
+    y_topo = int(ys_all.min())
+    altura = int(max(1, y_base - y_topo))
+    largura_bbox = int(xs_all.max() - xs_all.min() + 1)
+    largura_max = max(22, int(round(CAULE_LARGURA_MAX_FRAC * float(largura_bbox))))
+    desvio_lateral_max = int(
+        max(140, min(CAULE_DESVIO_LATERAL_MAX_ABS, round(CAULE_DESVIO_LATERAL_MAX_FRAC * float(largura_bbox))))
+    )
+    gap = max(CAULE_CLUSTER_GAP_PX, int(round(0.02 * float(largura_bbox))))
+    passo = max(6, int(CAULE_BANDA_PX))
+    custo_cor = _mapa_custo_cor_caule(img_bgr, mask_planta_acima)
+
+    bandas: List[List[Dict[str, float]]] = []
+    for y_centro in range(y_base, y_topo - 1, -passo):
+        y0 = max(0, int(y_centro - passo // 2))
+        y1 = min(h, int(y_centro + passo // 2 + 1))
+        candidatos: List[Dict[str, float]] = []
+
+        ys_skel, xs_skel = np.where(skel[y0:y1, :] > 0)
+        for grupo in _agrupar_xs_caule(xs_skel, gap):
+            largura = int(grupo.max() - grupo.min() + 1)
+            if largura > largura_max:
+                continue
+            x_med = int(round(float(np.median(grupo))))
+            if abs(int(x_med) - int(x_base)) > desvio_lateral_max:
+                continue
+            idx_grupo = np.isin(xs_skel, grupo)
+            y_med = int(round(float(y0 + np.median(ys_skel[idx_grupo])))) if np.any(idx_grupo) else int(y_centro)
+            candidatos.append(
+                {
+                    "x": float(x_med),
+                    "y": float(y_med),
+                    "largura": float(largura),
+                    "custo_cor": float(custo_cor[min(h - 1, max(0, y_med)), min(w - 1, max(0, x_med))]),
+                }
+            )
+
+        if not candidatos:
+            strip = mask_planta_acima[y0:y1, :]
+            n_labels, labels, stats, _ = cv2.connectedComponentsWithStats((strip > 0).astype(np.uint8), connectivity=8)
+            for label in range(1, n_labels):
+                largura = int(stats[label, cv2.CC_STAT_WIDTH])
+                area = int(stats[label, cv2.CC_STAT_AREA])
+                if area < 2 or largura > largura_max:
+                    continue
+                ys_lbl, xs_lbl = np.where(labels == label)
+                if xs_lbl.size == 0:
+                    continue
+                x_med = int(round(float(np.median(xs_lbl))))
+                if abs(int(x_med) - int(x_base)) > desvio_lateral_max:
+                    continue
+                y_med = int(round(float(y0 + np.median(ys_lbl))))
+                candidatos.append(
+                    {
+                        "x": float(x_med),
+                        "y": float(y_med),
+                        "largura": float(largura),
+                        "custo_cor": float(custo_cor[min(h - 1, max(0, y_med)), min(w - 1, max(0, x_med))]) + 18.0,
+                    }
+                )
+
+        unicos: List[Dict[str, float]] = []
+        for cand in sorted(candidatos, key=lambda c: c["custo_cor"] + 0.2 * c["largura"]):
+            if any(abs(cand["x"] - outro["x"]) <= 5 for outro in unicos):
+                continue
+            unicos.append(cand)
+        if unicos:
+            bandas.append(unicos[:10])
+
+    if len(bandas) < CAULE_MIN_PONTOS_EIXO:
+        return None
+
+    beam: List[Dict[str, object]] = [
+        {
+            "custo": 0.0,
+            "pontos": [(float(y_base), float(x_base))],
+            "ultimo": {"x": float(x_base), "y": float(y_base), "largura": 3.0, "custo_cor": -20.0},
+            "slope": 0.0,
+        }
+    ]
+    melhores: List[Dict[str, object]] = []
+    for banda in bandas:
+        novos: List[Dict[str, object]] = []
+        for estado in beam:
+            ultimo = estado["ultimo"]
+            for cand in banda:
+                dy = max(1.0, float(ultimo["y"]) - float(cand["y"]))
+                if dy <= 0:
+                    continue
+                dx = float(cand["x"]) - float(ultimo["x"])
+                slope = dx / dy
+                curvatura = abs(slope - float(estado["slope"]))
+                custo = (
+                    float(estado["custo"])
+                    + 0.20 * abs(dx)
+                    + 70.0 * curvatura
+                    + 0.20 * float(cand["largura"])
+                    + float(cand["custo_cor"])
+                )
+                pontos = list(estado["pontos"]) + [(float(cand["y"]), float(cand["x"]))]
+                novos.append({"custo": custo, "pontos": pontos, "ultimo": cand, "slope": slope})
+        if not novos:
+            continue
+        novos.sort(key=lambda e: float(e["custo"]))
+        beam = novos[:CAULE_BEAM_WIDTH]
+        melhores.extend(beam[: min(8, len(beam))])
+
+    if not melhores:
+        return None
+
+    elegiveis = [
+        e for e in melhores if float(e["pontos"][0][0] - e["pontos"][-1][0]) >= 0.45 * float(altura)
+    ] or melhores
+
+    def score_estado(e: Dict[str, object]) -> float:
+        pontos = e["pontos"]
+        subida = float(pontos[0][0] - pontos[-1][0])
+        return 3.0 * subida - 0.22 * float(e["custo"])
+
+    escolhido = max(elegiveis, key=score_estado)
+    caminho = _suavizar_eixo_caule(escolhido["pontos"], altura)
+    if len(caminho) < 2:
+        return None
+
+    path_mask = _mask_linha_eixo(mask_planta_acima.shape, caminho, espessura=2)
+    mask_caule = cv2.dilate(path_mask, _kernel((7, 7)), iterations=1)
+    mask_caule = cv2.bitwise_and(mask_caule, cv2.dilate(mask_planta_acima, _kernel((5, 5)), iterations=1))
+    return mask_caule
+
+
+def estimar_eixo_caule(
+    mask_planta_acima: np.ndarray,
+    ponto_base: Tuple[int, int],
+    img_bgr: Optional[np.ndarray] = None,
+    usar_pista_cor: bool = True,
+) -> np.ndarray:
     skel = skeletonize(mask_planta_acima)
     h, w = skel.shape
 
     ponto_inicio = _ajustar_para_skeleton(skel, ponto_base)
     if ponto_inicio is None:
         return np.zeros_like(mask_planta_acima)
+
+    if usar_pista_cor:
+        mask_pista = _estimar_eixo_caule_por_pista(mask_planta_acima, ponto_base, skel, img_bgr)
+        if mask_pista is not None and cv2.countNonZero(mask_pista) > 0:
+            return mask_pista
 
     x0, y0 = ponto_inicio
     visitado = np.zeros_like(skel, dtype=bool)
@@ -1391,8 +1623,15 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
 
     skeleton = skeletonize(mask_planta_acima)
     skeleton[y_limite_planta:, :] = 0
-    mask_caule = estimar_eixo_caule(mask_planta_acima, ponto_base)
+    mask_caule = estimar_eixo_caule(mask_planta_acima, ponto_base, usar_pista_cor=False)
+    mask_caule_refinado_comprimento = estimar_eixo_caule(
+        mask_planta_acima,
+        ponto_base,
+        img_bgr=img_bgr,
+        usar_pista_cor=True,
+    )
     mask_caule[y_limite_planta:, :] = 0
+    mask_caule_refinado_comprimento[y_limite_planta:, :] = 0
 
     if debug_dir is not None:
         debug_masks = {
@@ -1405,6 +1644,7 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
             "mask_comprimento_total": mask_comprimento_total,
             "skeleton": skeleton,
             "mask_caule": mask_caule,
+            "mask_caule_refinado_comprimento": mask_caule_refinado_comprimento,
         }
         if isinstance(debug_tubete, dict):
             if "mask_vaso_candidata" in debug_tubete:
@@ -1459,4 +1699,5 @@ def processar_tratamentos_iniciais(path: str, debug_dir: Optional[str] = None) -
         "mask_comprimento_total": mask_comprimento_total,
         "skeleton": skeleton,
         "mask_caule": mask_caule,
+        "mask_caule_refinado_comprimento": mask_caule_refinado_comprimento,
     }

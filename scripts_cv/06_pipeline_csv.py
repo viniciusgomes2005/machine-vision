@@ -46,6 +46,7 @@ M02 = _load_module(BASE_DIR / "02_comprimento_vertical.py", "m02_altura")
 M03 = _load_module(BASE_DIR / "03_diametro_coleto.py", "m03_diam")
 M04 = _load_module(BASE_DIR / "04_area_foliar.py", "m04_area")
 M05 = _load_module(BASE_DIR / "05_numero_folhas.py", "m05_folhas")
+M08 = _load_module(BASE_DIR / "08_ComprAvancado.py", "m08_compr_avancado")
 
 
 def _natural_key(path: Path):
@@ -132,7 +133,7 @@ def medir_comprimento_total_debug(
     return int(x1 - x0 + 1), {"x0": x0, "x1": x1, "y": y}
 
 
-def medir_comprimento_total(
+def medir_comprimento_total_legado(
     mask_planta_acima: np.ndarray,
     mask_caule: np.ndarray | None = None,
     x_ref: int | None = None,
@@ -145,6 +146,19 @@ def medir_comprimento_total(
         y_topo_tubete=y_topo_tubete,
     )
     return int(comprimento)
+
+
+def medir_comprimento_total(
+    mask_planta_acima: np.ndarray,
+    mask_caule: np.ndarray | None = None,
+    skeleton: np.ndarray | None = None,
+) -> Tuple[int, np.ndarray, Dict]:
+    comprimento, mask_caminho, debug = M08.medir_comprimento_caule_skeleton(
+        mask_planta_acima,
+        mask_caule_seed=mask_caule,
+        skeleton=skeleton,
+    )
+    return int(round(float(comprimento))), mask_caminho, debug
 
 
 def processar_imagem(path: str, debug_dir: str | None = None) -> Dict[str, int | str]:
@@ -184,7 +198,14 @@ def processar_imagem(path: str, debug_dir: str | None = None) -> Dict[str, int |
     area = M04.medir_area_foliar(mask_folhas)
     nro_folhas = M05.contar_folhas(mask_folhas)
 
-    compr_total = medir_comprimento_total(mask_comprimento, mask_caule=dados["mask_caule"])
+    compr_total, _mask_caminho_compr, debug_compr = medir_comprimento_total(
+        mask_comprimento,
+        mask_caule=dados.get("mask_caule_refinado_comprimento", dados["mask_caule"]),
+        skeleton=dados["skeleton"],
+    )
+
+    if debug_dir is not None:
+        M08.salvar_debug_comprimento(Path(debug_dir), "comprimento_avancado", dados["img_bgr"], debug_compr)
 
     return {
         "Img": Path(path).stem,
@@ -295,9 +316,20 @@ def _salvar_csv(caminho: str, linhas: List[Dict], colunas: List[str]) -> None:
             writer.writerow(row)
 
 
-def rodar_pipeline(input_dir: str, output_csv: str, avaliar_eucalipto: bool = True) -> None:
+def rodar_pipeline(
+    input_dir: str,
+    output_csv: str,
+    avaliar_eucalipto: bool = True,
+    debug_dir: str | None = None,
+) -> None:
     imagens = iterar_imagens(input_dir)
-    resultados = [processar_imagem(str(p)) for p in imagens]
+    resultados = [
+        processar_imagem(
+            str(p),
+            debug_dir=str(Path(debug_dir) / p.stem) if debug_dir is not None else None,
+        )
+        for p in imagens
+    ]
 
     _salvar_csv(output_csv, resultados, COLUNAS_CSV)
     print(f"CSV salvo em: {output_csv}")
@@ -330,12 +362,23 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Nao calcula relatorio de MAPE para Eucalipto1..5",
     )
+    parser.add_argument(
+        "--debug-dir",
+        type=str,
+        default=None,
+        help="Pasta opcional para mascaras e overlays de debug por imagem",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    rodar_pipeline(args.input_dir, args.output_csv, avaliar_eucalipto=not args.sem_avaliacao)
+    rodar_pipeline(
+        args.input_dir,
+        args.output_csv,
+        avaliar_eucalipto=not args.sem_avaliacao,
+        debug_dir=args.debug_dir,
+    )
 
 
 if __name__ == "__main__":

@@ -117,11 +117,10 @@ def processar_debug(path_img: str, out_dir: str) -> None:
         altura_mask_compr = int(np.max(ys_compr) - np.min(ys_compr) + 1)
         if altura_mask_compr <= M06.ALTURA_MAX_MUDA_PEQUENA:
             mask_comprimento = dados["mask_planta_acima"]
-    compr_total, info_compr = M06.medir_comprimento_total_debug(
+    compr_total, _mask_caminho_compr, debug_compr = M06.medir_comprimento_total(
         mask_comprimento,
-        mask_caule=dados["mask_caule"],
-        x_ref=int(dados["x_centro_tubete"]),
-        y_topo_tubete=int(dados["y_topo_tubete"]),
+        mask_caule=dados.get("mask_caule_refinado_comprimento", dados["mask_caule"]),
+        skeleton=dados["skeleton"],
     )
 
     _salvar(out / "original.png", img)
@@ -130,8 +129,11 @@ def processar_debug(path_img: str, out_dir: str) -> None:
     _salvar(out / "mask_tubete.png", dados["mask_tubete"])
     _salvar(out / "mask_planta_acima.png", dados["mask_planta_acima"])
     _salvar(out / "mask_comprimento_total.png", mask_comprimento)
+    M06.M08.salvar_debug_comprimento(out, "comprimento_avancado", img, debug_compr)
     _salvar(out / "skeleton.png", dados["skeleton"])
     _salvar(out / "mask_caule.png", dados["mask_caule"])
+    if "mask_caule_refinado_comprimento" in dados:
+        _salvar(out / "mask_caule_refinado_comprimento.png", dados["mask_caule_refinado_comprimento"])
     _salvar(out / "mask_folhas.png", mask_folhas)
     for nome, mask in debug_folhas.items():
         _salvar(out / f"{nome}.png", mask)
@@ -147,11 +149,12 @@ def processar_debug(path_img: str, out_dir: str) -> None:
     cv2.circle(overlay_altura, (int(x_base_alt), int(y_base_alt)), 5, (0, 255, 255), -1)
     cv2.putText(overlay_altura, f"Altura Vert: {altura}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
     cv2.putText(overlay_altura, f"Compr Total: {compr_total}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (50, 240, 50), 2)
-    if info_compr["x0"] is not None:
-        x_min = int(info_compr["x0"])
-        x_max = int(info_compr["x1"])
-        y_cmp = int(info_compr["y"])
-        cv2.line(overlay_altura, (x_min, y_cmp), (x_max, y_cmp), (50, 240, 50), 2)
+    caminho = debug_compr.get("mask_caminho_caule_dilatado")
+    if caminho is not None:
+        overlay_caminho = np.zeros_like(overlay_altura)
+        overlay_caminho[:, :] = (50, 240, 50)
+        blend_caminho = cv2.addWeighted(overlay_altura, 1.0, overlay_caminho, 0.70, 0)
+        overlay_altura[caminho > 0] = blend_caminho[caminho > 0]
     _salvar(out / "overlay_altura_vertical.png", overlay_altura)
 
     overlay_diam = img.copy()
