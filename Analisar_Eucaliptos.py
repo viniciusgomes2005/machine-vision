@@ -23,6 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATASET_DIR = BASE_DIR / "Dataset_Projeto1" / "_Eucalipto_Escolhidos1"
 SCRIPT_PIPELINE = BASE_DIR / "scripts_cv" / "06_pipeline_csv.py"
 CSV_SAIDA = BASE_DIR / "resultados_eucaliptos.csv"
+DEBUG_DIR = BASE_DIR / "diagnosticos_eucaliptos"
 
 COLUNAS = [
     "Altura_vertical",
@@ -120,6 +121,7 @@ def main() -> None:
     print("Iniciando analise dos eucaliptos...", flush=True)
     print(f"Dataset: {DATASET_DIR}", flush=True)
     print(f"CSV de saida: {CSV_SAIDA}", flush=True)
+    print(f"Diagnosticos: {DEBUG_DIR}", flush=True)
 
     pipeline = carregar_pipeline()
     imagens = sorted(DATASET_DIR.glob("*.jpg"), key=id_eucalipto)
@@ -129,7 +131,8 @@ def main() -> None:
     resultados = []
     for imagem in imagens:
         print(f"Processando {imagem.name}...", flush=True)
-        medidas = pipeline.processar_imagem(str(imagem))
+        debug_imagem = DEBUG_DIR / imagem.stem
+        medidas = pipeline.processar_imagem(str(imagem), debug_dir=str(debug_imagem))
         linha = {
             "Eucalipto": id_eucalipto(imagem),
             "Altura_vertical": int(medidas["Altura Vert."]),
@@ -149,6 +152,7 @@ def main() -> None:
             f"Folhas={linha['N_Folhas']}",
             flush=True,
         )
+        print(f"Diagnostico salvo em: {debug_imagem}", flush=True)
 
     CSV_SAIDA.parent.mkdir(parents=True, exist_ok=True)
     with CSV_SAIDA.open("w", newline="", encoding="utf-8") as arquivo:
