@@ -38,6 +38,9 @@ HSV_BLUE_LOW = np.array([75, 40, 40], dtype=np.uint8)  # fundo azul, limite infe
 HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)  # fundo azul, limite superior
 TOP_RAW_HALF_W = 90  # janela lateral para recuperar topo no objeto bruto
 TOP_RAW_AREA_MIN = 12  # menor componente aceito nessa recuperacao do topo
+BASE_RIM_POSTERIOR_GAP_MAX = 9  # base perto do vaso deve encostar na borda superior/posterior da referencia
+ALTURA_MUDA_BAIXA_BASE_EXTRA_MAX = 3  # mudas muito baixas usam a borda do vaso mais colada na referencia
+ALTURA_MUDA_BAIXA_MAX = 320
 
 
 def _muda_compacta_com_tubete_alto(mask: np.ndarray, y_topo_tubete: int) -> bool:
@@ -255,8 +258,23 @@ def obter_pontos_altura_vertical(
         else:
             break
 
+    y_top_raw = None
+    if img_bgr is not None:
+        y_top_raw = _topo_raw_local(img_bgr, int(x_base), int(y_topo_tubete))
+
     if _muda_compacta_com_tubete_alto(mask_planta_local, int(y_topo_tubete)):
         y_base = int(y_base_lim)
+    else:
+        topo_raw_recuperado = y_top_raw is not None and int(y_top_raw) < min(int(y_top_global), int(y_top_conn))
+        topo_delta = int(y_top_conn) - int(y_top_global)
+        residuo_base_fino = (
+            int(largura_base) <= BASE_RESIDUO_W_MAX
+            and topo_delta >= BASE_RESIDUO_TOPO_DELTA_MIN
+            and topo_delta <= BASE_RESIDUO_TOPO_DELTA_MAX
+        )
+        gap_base_vaso = int(y_base_lim) - int(y_base)
+        if not topo_raw_recuperado and not residuo_base_fino and 0 <= gap_base_vaso <= BASE_RIM_POSTERIOR_GAP_MAX:
+            y_base = int(y_base_lim)
 
     # Residuo na base: quando a base fica colada ao topo do vaso com segmento fino,
     # corrige para a emergencia da muda alguns pixels acima.
@@ -273,10 +291,11 @@ def obter_pontos_altura_vertical(
 
     y_base = min(int(y_base), y_base_lim)
     y_topo = min(int(y_top_global), int(y_top_conn))
-    if img_bgr is not None:
-        y_top_raw = _topo_raw_local(img_bgr, int(x_base), int(y_topo_tubete))
-        if y_top_raw is not None:
-            y_topo = min(int(y_topo), int(y_top_raw))
+    if y_top_raw is not None:
+        y_topo = min(int(y_topo), int(y_top_raw))
+    altura_final = int(y_base) - int(y_topo)
+    if 0 < altura_final <= ALTURA_MUDA_BAIXA_MAX and not _muda_compacta_com_tubete_alto(mask_planta_local, int(y_topo_tubete)):
+        y_base = min(h - 1, int(y_base) + ALTURA_MUDA_BAIXA_BASE_EXTRA_MAX)
 
     return int(x_base), int(y_base), int(y_topo)
 

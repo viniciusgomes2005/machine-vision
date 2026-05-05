@@ -23,6 +23,8 @@ EXPANSAO_MAX = 20  # expansao maxima da janela quando faltam linhas boas
 HALF_WINDOW_X = 10  # meia janela horizontal ao redor do eixo do caule
 DILATE_ITERS = 2  # dilatacao usada no debug/apoio visual
 DIAM_PERCENTIL = 60  # percentil das larguras validas usado como diametro final
+ALTURA_MAX_MUDA_COMPACTA = 430  # mudas baixas sofrem mais com dilatacao perto da boca do vaso
+Y_TOPO_TUBETE_ALTO_FRAC = 0.58
 
 
 def _segmentos_horizontais(row_bool: np.ndarray) -> List[Tuple[int, int]]:
@@ -162,7 +164,16 @@ def medir_diametro_coleto_debug(
     diametro, linha = 0, None
     if mask_caule is not None:
         candidatos = []
-        for base in (stem_hint, mask_planta_acima, mask_dilatada):
+        ys_planta, _ = np.where(mask_planta_acima > 0)
+        muda_compacta = False
+        if ys_planta.size > 0:
+            altura_planta = int(np.max(ys_planta) - np.min(ys_planta) + 1)
+            muda_compacta = (
+                int(y_topo_tubete) < int(Y_TOPO_TUBETE_ALTO_FRAC * mask_planta_acima.shape[0])
+                and altura_planta <= ALTURA_MAX_MUDA_COMPACTA
+            )
+        bases = (stem_hint, mask_planta_acima) if muda_compacta else (stem_hint, mask_planta_acima, mask_dilatada)
+        for base in bases:
             d_i, linha_i = _estimar_no_intervalo(
                 base,
                 y_min,
